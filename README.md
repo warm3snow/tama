@@ -90,7 +90,7 @@ On first run, Tama Code creates a default configuration file at `~/.config/tama/
 
 Example configuration:
 
-```yaml
+```json
 {
   "providers": {
     "openai": {

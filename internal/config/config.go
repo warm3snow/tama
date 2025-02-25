@@ -57,7 +57,7 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("failed to create config directory: %v", err)
 	}
 
-	configFile := filepath.Join(configDir, "config.yaml")
+	configFile := filepath.Join(configDir, "config.json")
 	
 	// Check if config file exists
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {

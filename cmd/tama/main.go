@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io/ioutil"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/warm3snow/tama/internal/config"
@@ -12,12 +14,40 @@ import (
 	"github.com/warm3snow/tama/internal/ui"
 )
 
+// showConfigFile displays the contents of the config file
+func showConfigFile() error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %v", err)
+	}
+
+	configDir := filepath.Join(homeDir, ".config", "tama")
+	configPath := filepath.Join(configDir, "config.json")
+	
+	// Check if file exists
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found at %s", configPath)
+	}
+	
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %v", err)
+	}
+
+	fmt.Println("\n--- Tama Configuration File ---")
+	fmt.Printf("File: %s\n\n", configPath)
+	fmt.Println(string(content))
+	fmt.Println("------------------------------")
+	return nil
+}
+
 // runChatInterface starts the interactive chat session
 func runChatInterface(client *llm.Client) {
 	reader := bufio.NewReader(os.Stdin)
 	userPrinter, aiPrinter := ui.CreateColoredPrinters()
 	
 	ui.PrintModelInfo(client.GetProvider(), client.GetModel())
+	fmt.Println("Type '/config' to view your configuration file")
 	
 	for {
 		ui.ShowPrompt()
@@ -33,7 +63,17 @@ func runChatInterface(client *llm.Client) {
 			fmt.Println("Goodbye!")
 			break
 		}
+
+		// Handle /config command - check with or without the slash
+		if input == "/config" || input == "config" {
+			err := showConfigFile()
+			if err != nil {
+				fmt.Printf("Error showing config file: %v\n", err)
+			}
+			continue
+		}
 		
+		// Only send non-command input to the LLM
 		userPrinter(input)
 		
 		response, err := client.SendMessage(input)
