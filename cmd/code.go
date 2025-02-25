@@ -236,8 +236,8 @@ func startCodeAssistant() {
 func showCodeWelcomeMessage(cfg config.Config) {
 	PrintLogo("Code")
 	modelInfo := color.New(color.FgCyan)
-	modelInfo.Printf("Connected to %s model: %s\n", cfg.Defaults.Provider, cfg.Defaults.Model)
 	fmt.Println("AI-powered coding companion")
+	modelInfo.Printf("Connected to %s model: %s\n", cfg.Defaults.Provider, cfg.Defaults.Model)
 	fmt.Println("Type 'exit' or 'quit' to end the session")
 	fmt.Println("Type '/help' to show available commands")
 	fmt.Println("Type '/!command' to directly execute terminal commands")
