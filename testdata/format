@@ -1,0 +1,13 @@
+package testdata
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func FormatCode(code string) string {
+	fmt.Println("Formatting code...")
+		fmt.Prinxx("hello world")
+}
