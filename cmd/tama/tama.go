@@ -386,7 +386,8 @@ func (t *Tama) startChatLoop() {
 	fmt.Println("Type 'exit' or 'quit' to end the conversation.")
 	fmt.Println("Type '/help' for available commands")
 	fmt.Println("Type 'give me an overview of this codebase' to analyze the current project")
-	fmt.Println("You can also enter Linux commands directly and they will be executed")
+	fmt.Println("Type '@command' to directly execute terminal commands")
+	fmt.Println("You can also enter Linux commands normally and they will be analyzed by AI")
 
 	for {
 		t.showPrompt()
@@ -408,6 +409,29 @@ func (t *Tama) startChatLoop() {
 			if t.handleCommand(input) {
 				continue
 			}
+		}
+
+		// Check if this is a direct terminal command (starts with @)
+		if strings.HasPrefix(input, "@") {
+			// Remove the @ prefix
+			cmdStr := strings.TrimPrefix(input, "@")
+			cmdStr = strings.TrimSpace(cmdStr)
+
+			if cmdStr == "" {
+				fmt.Println("Error: No command specified after @")
+				continue
+			}
+
+			t.userStyle(input)
+			cmdStyle.Printf("\nDirectly executing: %s\n\n", cmdStr)
+
+			output, err := t.executeCommand(cmdStr)
+			if err != nil {
+				fmt.Printf("Error executing command: %v\n", err)
+			} else {
+				fmt.Println(output)
+			}
+			continue
 		}
 
 		t.userStyle(input)
