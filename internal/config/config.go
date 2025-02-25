@@ -18,9 +18,9 @@ type Config struct {
 	Providers map[string]Provider `json:"providers"`
 	Defaults  struct {
 		Provider    string  `json:"provider"`
-		Model      string  `json:"model"`
+		Model       string  `json:"model"`
 		Temperature float64 `json:"temperature"`
-		MaxTokens  int     `json:"max_tokens"`
+		MaxTokens   int     `json:"max_tokens"`
 	} `json:"defaults"`
 }
 
@@ -46,36 +46,37 @@ func GetDefaultConfig() Config {
 }
 
 // LoadConfig initializes and loads the configuration
-func LoadConfig() (Config, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return Config{}, fmt.Errorf("failed to get home directory: %v", err)
+func LoadConfig(configPath string) (Config, error) {
+	var configFile string
+
+	// If configPath is provided, use it
+	if configPath != "" {
+		configFile = configPath
+	} else {
+		// Otherwise use default location
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return Config{}, fmt.Errorf("failed to get home directory: %v", err)
+		}
+
+		configDir := filepath.Join(homeDir, ".config", "tama")
+		if err := os.MkdirAll(configDir, 0755); err != nil {
+			return Config{}, fmt.Errorf("failed to create config directory: %v", err)
+		}
+
+		configFile = filepath.Join(configDir, "config.json")
 	}
 
-	configDir := filepath.Join(homeDir, ".config", "tama")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return Config{}, fmt.Errorf("failed to create config directory: %v", err)
-	}
-
-	configFile := filepath.Join(configDir, "config.json")
-	
 	// Check if config file exists
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		// Config doesn't exist, create default
 		config := GetDefaultConfig()
-		
-		file, err := os.Create(configFile)
-		if err != nil {
-			return Config{}, fmt.Errorf("failed to create config file: %v", err)
-		}
-		defer file.Close()
 
-		encoder := json.NewEncoder(file)
-		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(config); err != nil {
-			return Config{}, fmt.Errorf("failed to write config file: %v", err)
+		// Save the default config to file
+		if err := config.SaveToFile(configFile); err != nil {
+			return Config{}, err
 		}
-		
+
 		return config, nil
 	} else {
 		// Config exists, load it
@@ -90,7 +91,24 @@ func LoadConfig() (Config, error) {
 		if err := decoder.Decode(&config); err != nil {
 			return Config{}, fmt.Errorf("failed to parse config file: %v", err)
 		}
-		
+
 		return config, nil
 	}
-} 
+}
+
+// SaveToFile saves the configuration to the specified file
+func (c *Config) SaveToFile(configFile string) error {
+	file, err := os.Create(configFile)
+	if err != nil {
+		return fmt.Errorf("failed to create config file: %v", err)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(c); err != nil {
+		return fmt.Errorf("failed to write config file: %v", err)
+	}
+
+	return nil
+}
