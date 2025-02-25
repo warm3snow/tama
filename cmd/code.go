@@ -129,17 +129,9 @@ func startCodeAssistant() {
 	// Show welcome message
 	showCodeWelcomeMessage(Config)
 
-	// 创建readline实例
-	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          "Code Assistant > ",
-		HistoryFile:     filepath.Join(os.TempDir(), "tama_code_history.txt"),
-		AutoComplete:    completer{},
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
-	})
-
-	if err != nil {
-		fmt.Printf("Error initializing readline: %v\n", err)
+	// 初始化readline
+	rl := initializeReadline()
+	if rl == nil {
 		return
 	}
 	defer rl.Close()
@@ -178,9 +170,20 @@ func startCodeAssistant() {
 
 		// Check if this is a slash command
 		if strings.HasPrefix(input, "/") {
-			if handleSlashCommand(input, commands) {
+			cmdHandled, needReset, _ := handleSlashCommand(input, commands)
+			if cmdHandled {
 				// 命令成功执行后添加到历史记录
 				rl.SaveHistory(input)
+
+				// 如果需要重置readline（执行了交互式命令）
+				if needReset {
+					rl.Close()
+					rl = initializeReadline()
+					if rl == nil {
+						fmt.Println("Error reinitializing readline after command execution")
+						return
+					}
+				}
 				continue
 			}
 		}
@@ -205,6 +208,16 @@ func startCodeAssistant() {
 
 			// 命令成功执行后添加到历史记录
 			rl.SaveHistory(input)
+
+			// 如果是交互式命令，重新初始化readline
+			if isInteractiveTerminalCommand(cmdStr) {
+				rl.Close()
+				rl = initializeReadline()
+				if rl == nil {
+					fmt.Println("Error reinitializing readline after command execution")
+					return
+				}
+			}
 			continue
 		}
 
@@ -373,6 +386,24 @@ func startCodeAssistant() {
 	}
 }
 
+// initializeReadline 创建并初始化readline实例
+func initializeReadline() *readline.Instance {
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          "Code Assistant > ",
+		HistoryFile:     filepath.Join(os.TempDir(), "tama_code_history.txt"),
+		AutoComplete:    completer{},
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	})
+
+	if err != nil {
+		fmt.Printf("Error initializing readline: %v\n", err)
+		return nil
+	}
+
+	return rl
+}
+
 // showCodeWelcomeMessage displays the welcome message for the code assistant
 func showCodeWelcomeMessage(cfg config.Config) {
 	PrintLogo("Code")
@@ -426,7 +457,11 @@ func setupSlashCommands() map[string]SlashCommand {
 }
 
 // handleSlashCommand processes commands that start with "/"
-func handleSlashCommand(input string, commands map[string]SlashCommand) bool {
+// 返回值：
+// - bool: 是否处理了命令
+// - bool: 是否需要重新初始化readline（执行了交互式终端命令）
+// - string: 执行的命令（如果是交互式命令）
+func handleSlashCommand(input string, commands map[string]SlashCommand) (bool, bool, string) {
 	// 检查是否是直接执行命令（以/!开头）
 	if strings.HasPrefix(input, "/!") {
 		// 移除/!前缀
@@ -435,7 +470,7 @@ func handleSlashCommand(input string, commands map[string]SlashCommand) bool {
 
 		if cmdStr == "" {
 			fmt.Println("Error: No command specified after /!")
-			return true
+			return true, false, ""
 		}
 
 		fmt.Printf("\nDirectly executing: %s\n\n", cmdStr)
@@ -444,7 +479,10 @@ func handleSlashCommand(input string, commands map[string]SlashCommand) bool {
 		if err != nil {
 			fmt.Printf("Error executing command: %v\n", err)
 		}
-		return true
+
+		// 检查是否执行了交互式命令
+		needReset := isInteractiveTerminalCommand(cmdStr)
+		return true, needReset, cmdStr
 	}
 
 	// 处理 /cd 命令，支持带参数的情况
@@ -456,7 +494,7 @@ func handleSlashCommand(input string, commands map[string]SlashCommand) bool {
 		if dirPath == "" {
 			fmt.Println("Error: No directory specified")
 			fmt.Printf("Current directory: %s\n", getCurrentDirectory())
-			return true
+			return true, false, ""
 		}
 
 		// 处理 ~ 符号表示用户主目录
@@ -464,7 +502,7 @@ func handleSlashCommand(input string, commands map[string]SlashCommand) bool {
 			homeDir, err := os.UserHomeDir()
 			if err != nil {
 				fmt.Printf("Error getting home directory: %v\n", err)
-				return true
+				return true, false, ""
 			}
 			dirPath = filepath.Join(homeDir, strings.TrimPrefix(dirPath, "~"))
 		}
@@ -473,11 +511,11 @@ func handleSlashCommand(input string, commands map[string]SlashCommand) bool {
 		err := os.Chdir(dirPath)
 		if err != nil {
 			fmt.Printf("Error changing directory: %v\n", err)
-			return true
+			return true, false, ""
 		}
 
 		fmt.Printf("Changed directory to: %s\n", getCurrentDirectory())
-		return true
+		return true, false, ""
 	}
 
 	// Strip the leading "/"
@@ -492,12 +530,12 @@ func handleSlashCommand(input string, commands map[string]SlashCommand) bool {
 		if err != nil {
 			fmt.Printf("Error executing command %s: %v\n", cmdName, err)
 		}
-		return true
+		return true, false, ""
 	}
 
 	fmt.Printf("Unknown command: /%s\n", cmdName)
 	fmt.Println("Type /help for available commands")
-	return true
+	return true, false, ""
 }
 
 // getCurrentDirectory returns the current working directory
@@ -552,20 +590,105 @@ Only respond with the JSON, nothing else.`, input)
 func executeCommand(cmdStr string) error {
 	cmd := exec.Command("sh", "-c", cmdStr)
 
-	// Set environment variables to encourage color output
-	env := os.Environ()
-	cmd.Env = append(env,
-		"FORCE_COLOR=true",
-		"CLICOLOR_FORCE=1",
-		"CLICOLOR=1",
-		"COLORTERM=truecolor")
+	// 只设置最基本的环境变量，避免干扰终端输出
+	cmd.Env = os.Environ()
 
 	// Connect command's stdout and stderr directly to our process stdout and stderr
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+
+	// 检查是否是交互式终端命令
+	isInteractive := isInteractiveTerminalCommand(cmdStr)
+
+	// 如果是交互式命令，保存终端状态
+	var savedTermSettings []byte
+	if isInteractive {
+		sttyCmd := exec.Command("stty", "-g")
+		sttyCmd.Stdin = os.Stdin
+		var err error
+		savedTermSettings, err = sttyCmd.Output()
+		if err != nil {
+			fmt.Printf("Warning: Failed to save terminal settings: %v\n", err)
+		}
+	}
 
 	// Execute the command
-	return cmd.Run()
+	err := cmd.Run()
+
+	// 如果是交互式命令并且成功保存了终端设置，恢复终端状态
+	if isInteractive && len(savedTermSettings) > 0 {
+		fmt.Println("\nRestoring terminal state...")
+
+		// 使用保存的设置恢复终端
+		restoreCmd := exec.Command("stty", string(savedTermSettings))
+		restoreCmd.Stdin = os.Stdin
+		if restoreErr := restoreCmd.Run(); restoreErr != nil {
+			fmt.Printf("Warning: Failed to restore terminal settings: %v\n", restoreErr)
+			// 如果无法恢复，使用通用的stty sane作为备选
+			resetTerminal()
+		}
+	}
+
+	return err
+}
+
+// isInteractiveTerminalCommand 检查命令是否是可能会修改终端状态的交互式程序
+func isInteractiveTerminalCommand(cmdStr string) bool {
+	cmdStr = strings.TrimSpace(cmdStr)
+	cmdLower := strings.ToLower(cmdStr)
+
+	// 提取主命令（去除参数）
+	mainCmd := cmdLower
+	if spaceIndex := strings.Index(mainCmd, " "); spaceIndex > 0 {
+		mainCmd = mainCmd[:spaceIndex]
+	}
+
+	// 检查是否是已知的交互式终端程序
+	interactiveCommands := map[string]bool{
+		"vim": true, "vi": true, "nvim": true,
+		"nano": true, "emacs": true,
+		"less": true, "more": true,
+		"top": true, "htop": true,
+		"man": true, "pico": true,
+		"screen": true, "tmux": true,
+		"joe": true, "jed": true,
+		"mutt": true, "pine": true,
+		"mc": true, // Midnight Commander
+	}
+
+	return interactiveCommands[mainCmd]
+}
+
+// resetTerminal 重置终端状态
+func resetTerminal() {
+	// 尝试使用多种方法重置终端状态
+	methods := []struct {
+		cmd  string
+		args []string
+	}{
+		{"stty", []string{"sane"}},           // 最基本的终端重置
+		{"tput", []string{"reset"}},          // 使用tput重置
+		{"reset", []string{}},                // 使用reset命令
+		{"stty", []string{"echo"}},           // 确保回显打开
+		{"stty", []string{"icanon", "echo"}}, // 打开规范模式和回显
+	}
+
+	for _, method := range methods {
+		cmd := exec.Command(method.cmd, method.args...)
+		cmd.Stdin = os.Stdin
+		// 忽略输出，避免干扰界面
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+		// 忽略错误，尝试下一种方法
+		_ = cmd.Run()
+	}
+
+	// 清空输入缓冲区
+	exec.Command("bash", "-c", "while read -t 0.1; do :; done").Run()
+
+	// 重新显示提示符
+	fmt.Print("\r")
 }
 
 // isCodebaseAnalysisRequest checks if the user is asking for codebase information
