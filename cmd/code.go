@@ -1,9 +1,9 @@
 package cmd
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chzyer/readline"
 	"github.com/fatih/color"
 	"github.com/sergi/go-diff/diffmatchpatch"
 	"github.com/spf13/cobra"
@@ -62,10 +63,44 @@ type CommandAnalysisResponse struct {
 	Reason    string `json:"reason"`
 }
 
+// completer 实现readline.AutoCompleter接口，提供命令补全功能
+type completer struct{}
+
+// Do 实现自动补全逻辑
+func (c completer) Do(line []rune, pos int) (newLine [][]rune, length int) {
+	// 获取当前输入的前缀
+	lineStr := string(line[:pos])
+
+	// 仅当输入以/开头时提供命令补全
+	if strings.HasPrefix(lineStr, "/") {
+		prefix := strings.TrimPrefix(lineStr, "/")
+
+		// 定义可用的命令
+		var cmds = []string{"help", "config", "cd", "!"}
+
+		// 过滤匹配的命令
+		var matches []string
+		for _, cmd := range cmds {
+			if strings.HasPrefix(cmd, prefix) {
+				matches = append(matches, cmd)
+			}
+		}
+
+		// 转换为需要的格式
+		result := make([][]rune, len(matches))
+		for i, match := range matches {
+			result[i] = []rune("/" + match)
+		}
+
+		return result, len(prefix) + 1
+	}
+
+	return nil, 0
+}
+
 // startCodeAssistant begins the interactive code assistant session
 func startCodeAssistant() {
 	client := llm.NewClient(Config)
-	reader := bufio.NewReader(os.Stdin)
 	userStyle, aiStyle := createStyledPrinters()
 	commands := setupSlashCommands()
 	cmdStyle := color.New(color.FgYellow).Add(color.Bold)
@@ -75,11 +110,39 @@ func startCodeAssistant() {
 	// Show welcome message
 	showCodeWelcomeMessage(Config)
 
+	// 创建readline实例
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          "Code Assistant > ",
+		HistoryFile:     filepath.Join(os.TempDir(), "tama_code_history.txt"),
+		AutoComplete:    completer{},
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	})
+
+	if err != nil {
+		fmt.Printf("Error initializing readline: %v\n", err)
+		return
+	}
+	defer rl.Close()
+
 	// Main interaction loop
 	for {
-		fmt.Print("Code Assistant > ")
+		// 使用readline获取输入
+		input, err := rl.Readline()
+		if err != nil {
+			if err == readline.ErrInterrupt {
+				if len(input) == 0 {
+					break
+				} else {
+					continue
+				}
+			} else if err == io.EOF {
+				break
+			}
+			fmt.Printf("Error reading input: %v\n", err)
+			break
+		}
 
-		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
 
 		if input == "" {
@@ -91,9 +154,14 @@ func startCodeAssistant() {
 			break
 		}
 
+		// 有效输入才显示和处理
+		userStyle(input)
+
 		// Check if this is a slash command
 		if strings.HasPrefix(input, "/") {
 			if handleSlashCommand(input, commands) {
+				// 命令成功执行后添加到历史记录
+				rl.SaveHistory(input)
 				continue
 			}
 		}
@@ -109,17 +177,17 @@ func startCodeAssistant() {
 				continue
 			}
 
-			userStyle(input)
 			cmdStyle.Printf("\nDirectly executing: %s\n\n", cmdStr)
 
 			err := executeCommand(cmdStr)
 			if err != nil {
 				fmt.Printf("Error executing command: %v\n", err)
 			}
+
+			// 命令成功执行后添加到历史记录
+			rl.SaveHistory(input)
 			continue
 		}
-
-		userStyle(input)
 
 		// First, check if this might be a shell command
 		isCmd, cmdStr, err := analyzeIfCommand(client, input)
@@ -229,6 +297,9 @@ func startCodeAssistant() {
 
 		// Update conversation history
 		client.UpdateConversation(input, response)
+
+		// 将有效消息添加到历史记录
+		rl.SaveHistory(input)
 	}
 }
 
@@ -240,7 +311,6 @@ func showCodeWelcomeMessage(cfg config.Config) {
 	modelInfo.Printf("Connected to %s model: %s\n", cfg.Defaults.Provider, cfg.Defaults.Model)
 	fmt.Println("Type 'exit' or 'quit' to end the session")
 	fmt.Println("Type '/help' to show available commands")
-	fmt.Println("Type '/!command' to directly execute terminal commands")
 }
 
 // setupSlashCommands registers built-in slash commands
@@ -257,6 +327,9 @@ func setupSlashCommands() map[string]SlashCommand {
 			}
 			fmt.Println("  exit      - Exit the program")
 			fmt.Println("  quit      - Exit the program")
+			fmt.Println("  @command  - Execute a command directly, e.g. @ls")
+			fmt.Println("  /!command - Execute a command directly, e.g. /!pwd")
+			fmt.Println("  ↑/↓       - Browse message history")
 			return nil
 		},
 	}
@@ -266,6 +339,16 @@ func setupSlashCommands() map[string]SlashCommand {
 		Description: "Show the current configuration",
 		Execute: func() error {
 			showConfig()
+			return nil
+		},
+	}
+
+	commands["cd"] = SlashCommand{
+		Name:        "cd",
+		Description: "Change the current working directory",
+		Execute: func() error {
+			fmt.Println("Usage: /cd <directory>")
+			fmt.Printf("Current directory: %s\n", getCurrentDirectory())
 			return nil
 		},
 	}
@@ -295,8 +378,44 @@ func handleSlashCommand(input string, commands map[string]SlashCommand) bool {
 		return true
 	}
 
+	// 处理 /cd 命令，支持带参数的情况
+	if strings.HasPrefix(input, "/cd ") {
+		// 提取目录参数
+		dirPath := strings.TrimPrefix(input, "/cd ")
+		dirPath = strings.TrimSpace(dirPath)
+
+		if dirPath == "" {
+			fmt.Println("Error: No directory specified")
+			fmt.Printf("Current directory: %s\n", getCurrentDirectory())
+			return true
+		}
+
+		// 处理 ~ 符号表示用户主目录
+		if strings.HasPrefix(dirPath, "~") {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Printf("Error getting home directory: %v\n", err)
+				return true
+			}
+			dirPath = filepath.Join(homeDir, strings.TrimPrefix(dirPath, "~"))
+		}
+
+		// 切换目录
+		err := os.Chdir(dirPath)
+		if err != nil {
+			fmt.Printf("Error changing directory: %v\n", err)
+			return true
+		}
+
+		fmt.Printf("Changed directory to: %s\n", getCurrentDirectory())
+		return true
+	}
+
 	// Strip the leading "/"
 	cmdName := strings.TrimPrefix(input, "/")
+	// Handle arguments if any
+	parts := strings.SplitN(cmdName, " ", 2)
+	cmdName = parts[0]
 
 	// Check if command exists
 	if cmd, exists := commands[cmdName]; exists {
@@ -310,6 +429,15 @@ func handleSlashCommand(input string, commands map[string]SlashCommand) bool {
 	fmt.Printf("Unknown command: /%s\n", cmdName)
 	fmt.Println("Type /help for available commands")
 	return true
+}
+
+// getCurrentDirectory returns the current working directory
+func getCurrentDirectory() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Sprintf("Error: %v", err)
+	}
+	return cwd
 }
 
 // analyzeIfCommand checks if the user input is a Linux command
