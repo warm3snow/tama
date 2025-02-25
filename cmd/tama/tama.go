@@ -2,7 +2,6 @@ package tama
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -177,19 +176,23 @@ Only respond with the JSON, nothing else.`, input)
 }
 
 // executeCommand executes a shell command and returns the output
-func (t *Tama) executeCommand(cmdStr string) (string, error) {
+func (t *Tama) executeCommand(cmdStr string) error {
 	cmd := exec.Command("sh", "-c", cmdStr)
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	// Set environment variables to encourage color output
+	env := os.Environ()
+	cmd.Env = append(env,
+		"FORCE_COLOR=true",
+		"CLICOLOR_FORCE=1",
+		"CLICOLOR=1",
+		"COLORTERM=truecolor")
 
-	err := cmd.Run()
-	if err != nil {
-		return "", fmt.Errorf("command failed: %v\nStderr: %s", err, stderr.String())
-	}
+	// Connect command's stdout and stderr directly to our process stdout and stderr
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
-	return stdout.String(), nil
+	// Execute the command
+	return cmd.Run()
 }
 
 // createStyledPrinters returns styled printer functions for user and AI messages
@@ -425,11 +428,9 @@ func (t *Tama) startChatLoop() {
 			t.userStyle(input)
 			cmdStyle.Printf("\nDirectly executing: %s\n\n", cmdStr)
 
-			output, err := t.executeCommand(cmdStr)
+			err := t.executeCommand(cmdStr)
 			if err != nil {
 				fmt.Printf("Error executing command: %v\n", err)
-			} else {
-				fmt.Println(output)
 			}
 			continue
 		}
@@ -440,11 +441,9 @@ func (t *Tama) startChatLoop() {
 		isCmd, cmdStr, err := t.analyzeIfCommand(input)
 		if err == nil && isCmd {
 			cmdStyle.Printf("\nExecuting command: %s\n\n", cmdStr)
-			output, err := t.executeCommand(cmdStr)
+			err := t.executeCommand(cmdStr)
 			if err != nil {
 				fmt.Printf("Error executing command: %v\n", err)
-			} else {
-				fmt.Println(output)
 			}
 			continue
 		}
