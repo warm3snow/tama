@@ -2,10 +2,15 @@ package tama
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/warm3snow/tama/internal/config"
@@ -125,6 +130,68 @@ func (t *Tama) handleCommand(input string) bool {
 	return true
 }
 
+// CommandAnalysisResponse represents the structured response for command analysis
+type CommandAnalysisResponse struct {
+	IsCommand bool   `json:"is_command"`
+	Command   string `json:"command"`
+	Reason    string `json:"reason"`
+}
+
+// analyzeIfCommand checks if the user input is a Linux command
+func (t *Tama) analyzeIfCommand(input string) (bool, string, error) {
+	// Create a special prompt for the LLM to analyze if this is a command
+	prompt := fmt.Sprintf(`Analyze if the following text is a valid Linux/Unix shell command:
+"%s"
+
+Return your analysis in this JSON format:
+{
+  "is_command": true/false,
+  "command": "the command if it is one, or empty string",
+  "reason": "brief explanation of your decision"
+}
+
+Only respond with the JSON, nothing else.`, input)
+
+	// Send to LLM for analysis
+	response, err := t.client.SendMessage(prompt)
+	if err != nil {
+		return false, "", err
+	}
+
+	// Try to parse the response as JSON
+	var result CommandAnalysisResponse
+
+	// Extract JSON object from response (in case the LLM adds extra text)
+	jsonPattern := regexp.MustCompile(`(?s)\{.*\}`)
+	match := jsonPattern.FindString(response)
+	if match == "" {
+		return false, "", fmt.Errorf("couldn't extract JSON from LLM response")
+	}
+
+	err = json.Unmarshal([]byte(match), &result)
+	if err != nil {
+		return false, "", fmt.Errorf("failed to parse LLM response: %v", err)
+	}
+
+	return result.IsCommand, result.Command, nil
+}
+
+// executeCommand executes a shell command and returns the output
+func (t *Tama) executeCommand(cmdStr string) (string, error) {
+	cmd := exec.Command("sh", "-c", cmdStr)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("command failed: %v\nStderr: %s", err, stderr.String())
+	}
+
+	return stdout.String(), nil
+}
+
 // createStyledPrinters returns styled printer functions for user and AI messages
 func createStyledPrinters() (userPrinter, aiPrinter func(string)) {
 	userStyle := color.New(color.FgGreen).Add(color.Bold)
@@ -205,13 +272,121 @@ func (t *Tama) showPrompt() {
 	fmt.Print("Paste code here if prompted > ")
 }
 
+// isCodebaseAnalysisRequest checks if the user is asking for codebase information
+func isCodebaseAnalysisRequest(input string) bool {
+	input = strings.ToLower(input)
+	patterns := []string{
+		"overview of (this |the |)codebase",
+		"(explain|describe|understand|analyze|summarize) (this |the |)codebase",
+		"what('s| is) (this |the |)codebase (about|doing)",
+		"how (is|does) (this |the |)codebase (work|structured)",
+		"tell me about (this |the |)codebase",
+	}
+
+	for _, pattern := range patterns {
+		matched, _ := regexp.MatchString(pattern, input)
+		if matched {
+			return true
+		}
+	}
+
+	return false
+}
+
+// collectCodebaseInfo gathers information about the codebase
+func (t *Tama) collectCodebaseInfo() string {
+	// Get current working directory
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "Error getting current directory: " + err.Error()
+	}
+
+	// Extract project name from path
+	projectName := filepath.Base(cwd)
+
+	// Collect basic structure information
+	var info strings.Builder
+	info.WriteString(fmt.Sprintf("# %s Codebase Overview\n\n", projectName))
+	info.WriteString(fmt.Sprintf("Current directory: %s\n", cwd))
+	info.WriteString(fmt.Sprintf("Time of analysis: %s\n\n", time.Now().Format(time.RFC1123)))
+
+	// Try to find common directories and files
+	var dirs []string
+	var files []string
+	commonDirs := []string{"cmd", "internal", "pkg", "api", "web", "config", "docs"}
+	commonFiles := []string{"main.go", "go.mod", "go.sum", "README.md", "LICENSE"}
+
+	for _, dir := range commonDirs {
+		if fileInfo, err := os.Stat(filepath.Join(cwd, dir)); err == nil && fileInfo.IsDir() {
+			dirs = append(dirs, dir)
+		}
+	}
+
+	for _, file := range commonFiles {
+		if fileInfo, err := os.Stat(filepath.Join(cwd, file)); err == nil && !fileInfo.IsDir() {
+			files = append(files, file)
+		}
+	}
+
+	// Add directory information
+	if len(dirs) > 0 {
+		info.WriteString("## Key Directories\n\n")
+		for _, dir := range dirs {
+			info.WriteString(fmt.Sprintf("- %s/\n", dir))
+		}
+		info.WriteString("\n")
+	}
+
+	// Add file information
+	if len(files) > 0 {
+		info.WriteString("## Key Files\n\n")
+		for _, file := range files {
+			info.WriteString(fmt.Sprintf("- %s\n", file))
+		}
+		info.WriteString("\n")
+	}
+
+	// Try to read go.mod for dependencies
+	if gomodContent, err := os.ReadFile("go.mod"); err == nil {
+		info.WriteString("## Dependencies\n\n")
+		info.WriteString("From go.mod:\n```\n")
+		info.WriteString(string(gomodContent))
+		info.WriteString("```\n\n")
+	}
+
+	// Try to read README.md for project description
+	if readmeContent, err := os.ReadFile("README.md"); err == nil {
+		info.WriteString("## Project Description\n\n")
+		info.WriteString("From README.md:\n")
+		// Limit the size to avoid overwhelming LLM
+		readmeStr := string(readmeContent)
+		if len(readmeStr) > 1000 {
+			readmeStr = readmeStr[:1000] + "...(truncated)"
+		}
+		info.WriteString(readmeStr)
+		info.WriteString("\n\n")
+	}
+
+	info.WriteString("## Analysis Request\n\n")
+	info.WriteString("Please analyze this codebase and provide:\n")
+	info.WriteString("1. A high-level overview of what this project does\n")
+	info.WriteString("2. The main components and their interactions\n")
+	info.WriteString("3. The technology stack being used\n")
+	info.WriteString("4. Any notable design patterns or architecture choices\n")
+
+	return info.String()
+}
+
 // startChatLoop begins the interactive chat session with the LLM
 func (t *Tama) startChatLoop() {
 	modelInfo := color.New(color.FgCyan)
+	cmdStyle := color.New(color.FgYellow).Add(color.Bold)
 
 	modelInfo.Printf("\nConnected to %s model: %s\n", t.config.Defaults.Provider, t.config.Defaults.Model)
 	fmt.Println("Type 'exit' or 'quit' to end the conversation.")
 	fmt.Println("Type '/help' for available commands")
+	fmt.Println("Type 'give me an overview of this codebase' to analyze the current project")
+	fmt.Println("You can also enter Linux commands directly and they will be executed")
 
 	for {
 		t.showPrompt()
@@ -237,7 +412,33 @@ func (t *Tama) startChatLoop() {
 
 		t.userStyle(input)
 
-		response, err := t.client.SendMessage(input)
+		// First, check if this might be a shell command
+		isCmd, cmdStr, err := t.analyzeIfCommand(input)
+		if err == nil && isCmd {
+			cmdStyle.Printf("\nExecuting command: %s\n\n", cmdStr)
+			output, err := t.executeCommand(cmdStr)
+			if err != nil {
+				fmt.Printf("Error executing command: %v\n", err)
+			} else {
+				fmt.Println(output)
+			}
+			continue
+		}
+
+		// Check if this is a codebase analysis request
+		var response string
+
+		if isCodebaseAnalysisRequest(input) {
+			// Collect codebase info and enhance the prompt
+			codebaseInfo := t.collectCodebaseInfo()
+			fmt.Println("\nAnalyzing codebase, please wait...")
+			enhancedPrompt := fmt.Sprintf("%s\n\n%s", input, codebaseInfo)
+			response, err = t.client.SendMessage(enhancedPrompt)
+		} else {
+			// Regular message
+			response, err = t.client.SendMessage(input)
+		}
+
 		if err != nil {
 			fmt.Printf("Error: %v\n\n", err)
 			continue
