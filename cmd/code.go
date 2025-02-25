@@ -149,10 +149,7 @@ func showCodeWelcomeMessage() {
 	PrintLogo("Code")
 	fmt.Println("AI-powered coding companion")
 	fmt.Println("Type 'exit' or 'quit' to end the session")
-	fmt.Println("Type '/help' for available commands")
-	fmt.Println("Type 'give me an overview of this codebase' to analyze the current project")
 	fmt.Println("Type '@command' to directly execute terminal commands")
-	fmt.Println("You can also enter Linux commands normally and they will be analyzed by AI")
 }
 
 // setupSlashCommands registers built-in slash commands
