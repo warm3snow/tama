@@ -48,6 +48,25 @@ type CodeAction struct {
 	Description string `json:"description"` // Description of the action
 }
 
+// CodeChangeResponse indicates the user's decision about a code change
+type CodeChangeResponse int
+
+const (
+	Accept CodeChangeResponse = iota
+	Reject
+	Cancel
+)
+
+// GitIgnorePattern 表示单个 gitignore 模式
+type GitIgnorePattern struct {
+	Pattern   string
+	Negated   bool
+	Directory bool
+}
+
+// PathPromptPattern is the regex pattern to extract path and prompt
+var PathPromptPattern = regexp.MustCompile(`^(?:@([^\s]+)\s+)?(.*?)$`)
+
 func init() {
 	rootCmd.AddCommand(codeCmd)
 
@@ -200,94 +219,145 @@ func startCodeAssistant() {
 			continue
 		}
 
-		// Check if this is a codebase analysis request
+		// Check if this is a code-related request
+		// Extract path and prompt from input if it has the @path format
+		matches := PathPromptPattern.FindStringSubmatch(input)
+		var targetPath string
+		var promptText string
 		var response string
 
-		// Check if this is a code-related request
-		codeActions, isCodeRequest := analyzeCodeRequest(client, input)
-		if isCodeRequest && len(codeActions) > 0 {
-			fmt.Println("\nProcessing code request, please wait...")
+		if len(matches) >= 3 {
+			targetPath = matches[1]
+			promptText = matches[2]
+		} else {
+			promptText = input
+		}
 
-			// Execute code actions
-			for _, action := range codeActions {
-				switch action.Type {
-				case "analyze":
-					fmt.Printf("\nAnalyzing file: %s\n", action.FilePath)
-					content, err := readFile(action.FilePath)
-					if err != nil {
-						errorStyle.Printf("Error reading file: %v\n", err)
-						continue
-					}
+		// If no specific path is given, use current directory
+		if targetPath == "" {
+			targetPath = "."
+		}
 
-					// Send file content to LLM for analysis
-					analysisPrompt := fmt.Sprintf("Please analyze this code from %s:\n\n```\n%s\n```\n\n%s",
-						action.FilePath, content, action.Description)
-					analysisResponse, err := client.SendMessage(analysisPrompt)
-					if err != nil {
-						errorStyle.Printf("Error analyzing code: %v\n", err)
-						continue
-					}
+		// Get absolute path for clarity
+		absPath, err := filepath.Abs(targetPath)
+		if err == nil {
+			targetPath = absPath
+		}
 
-					aiStyle(analysisResponse)
+		// Check if target path exists
+		fileInfo, err := os.Stat(targetPath)
+		if err != nil {
+			if promptText == input { // Only report error if path was explicitly specified
+				fmt.Printf("Path does not exist or is not accessible: %s\n", targetPath)
+				response, err = client.SendMessage(input)
+			} else {
+				errorStyle.Printf("Error accessing path %s: %v\n", targetPath, err)
+				continue
+			}
+		} else if fileInfo.IsDir() {
+			// Process directory
+			fmt.Printf("\nAnalyzing directory: %s\n", targetPath)
 
-				case "edit":
-					fmt.Printf("\nEditing file: %s\n", action.FilePath)
-					oldContent, err := readFile(action.FilePath)
-					if err != nil {
-						errorStyle.Printf("Error reading file: %v\n", err)
-						continue
-					}
-
-					// Apply the edit
-					err = writeFile(action.FilePath, action.Content)
-					if err != nil {
-						errorStyle.Printf("Error writing file: %v\n", err)
-						continue
-					}
-
-					// Show diff
-					showDiff(oldContent, action.Content, action.FilePath, codeStyle)
-					fmt.Printf("\nSuccessfully edited %s\n", action.FilePath)
-
-				case "create":
-					fmt.Printf("\nCreating file: %s\n", action.FilePath)
-
-					// Ensure directory exists
-					dir := filepath.Dir(action.FilePath)
-					if dir != "." {
-						err := os.MkdirAll(dir, 0755)
-						if err != nil {
-							errorStyle.Printf("Error creating directory: %v\n", err)
-							continue
-						}
-					}
-
-					// Create the file
-					err := writeFile(action.FilePath, action.Content)
-					if err != nil {
-						errorStyle.Printf("Error creating file: %v\n", err)
-						continue
-					}
-
-					// Show the created content
-					fmt.Printf("\nCreated %s with content:\n", action.FilePath)
-					codeStyle.Printf("\n```\n%s\n```\n", action.Content)
-				}
+			// 读取 .gitignore 模式
+			gitignorePatterns, err := readGitIgnore(targetPath)
+			if err != nil {
+				fmt.Printf("Warning: Error reading .gitignore: %v\n", err)
+				// 继续处理，但不应用 gitignore 规则
+				gitignorePatterns = []GitIgnorePattern{}
 			}
 
-			// Get a summary of the changes
-			summaryPrompt := fmt.Sprintf("I've just made the following code changes based on your request:\n\n%s\n\nPlease provide a brief summary of what was done.",
-				formatCodeActions(codeActions))
-			response, err = client.SendMessage(summaryPrompt)
+			dirContent, err := getDirectoryContent(targetPath, gitignorePatterns)
 			if err != nil {
-				errorStyle.Printf("Error getting summary: %v\n", err)
+				errorStyle.Printf("Error reading directory: %v\n", err)
+				continue
+			}
+
+			// Send directory content to LLM with the prompt
+			analysisPrompt := fmt.Sprintf("Analyze this directory structure and the following request:\n\nDirectory: %s\n\n%s\n\nRequest: %s",
+				targetPath, dirContent, promptText)
+			response, err = client.SendMessage(analysisPrompt)
+			if err != nil {
+				errorStyle.Printf("Error analyzing directory: %v\n", err)
 				continue
 			}
 		} else {
-			// Regular message
-			response, err = client.SendMessage(input)
+			// Process file
+			fmt.Printf("\nAnalyzing file: %s\n", targetPath)
+
+			// 检查是否应该忽略此文件
+			gitignorePatterns, _ := readGitIgnore(filepath.Dir(targetPath))
+			if shouldIgnore(targetPath, filepath.Dir(targetPath), gitignorePatterns) {
+				fmt.Printf("Warning: This file is listed in .gitignore. Analysis may not be relevant.\n")
+			}
+
+			content, err := readFile(targetPath)
+			if err != nil {
+				errorStyle.Printf("Error reading file: %v\n", err)
+				continue
+			}
+
+			// Send file content to LLM with the prompt
+			analysisPrompt := fmt.Sprintf("Analyze this file and the following request:\n\nFile: %s\n\n```\n%s\n```\n\nRequest: %s",
+				targetPath, content, promptText)
+
+			// Check if this is a request to modify code
+			if containsModificationKeywords(promptText) {
+				// For requests that might modify the code
+				modifiedContent, err := processCodeModification(client, targetPath, content, promptText)
+				if err != nil {
+					errorStyle.Printf("Error processing code modification: %v\n", err)
+					continue
+				}
+
+				// If there are changes, show them and ask for confirmation
+				if modifiedContent != content {
+					fmt.Println("\nProposed changes:")
+					showDiff(content, modifiedContent, targetPath, codeStyle)
+
+					// Ask for confirmation
+					userResponse := promptForConfirmation(rl)
+					if userResponse == Accept {
+						// Apply the changes
+						err = writeFile(targetPath, modifiedContent)
+						if err != nil {
+							errorStyle.Printf("Error writing file: %v\n", err)
+							continue
+						}
+						fmt.Printf("\nChanges applied to %s\n", targetPath)
+						// Get a summary of the changes
+						summaryPrompt := fmt.Sprintf("I've just modified %s based on this request: \"%s\". Please provide a brief summary of what was done.",
+							targetPath, promptText)
+						response, err = client.SendMessage(summaryPrompt)
+						if err != nil {
+							errorStyle.Printf("Error summarizing changes: %v\n", err)
+							continue
+						}
+					} else if userResponse == Reject {
+						fmt.Println("\nChanges were rejected.")
+						response = "Changes were rejected."
+					} else { // Cancel
+						fmt.Println("\nOperation cancelled.")
+						continue
+					}
+				} else {
+					// No changes were needed
+					response, err = client.SendMessage(analysisPrompt)
+					if err != nil {
+						errorStyle.Printf("Error analyzing file: %v\n", err)
+						continue
+					}
+				}
+			} else {
+				// Regular file analysis
+				response, err = client.SendMessage(analysisPrompt)
+				if err != nil {
+					errorStyle.Printf("Error analyzing file: %v\n", err)
+					continue
+				}
+			}
 		}
 
+		// Check for errors in LLM response
 		if err != nil {
 			fmt.Printf("Error: %v\n\n", err)
 			continue
@@ -327,8 +397,7 @@ func setupSlashCommands() map[string]SlashCommand {
 			}
 			fmt.Println("  exit      - Exit the program")
 			fmt.Println("  quit      - Exit the program")
-			fmt.Println("  @command  - Execute a command directly, e.g. @ls")
-			fmt.Println("  /!command - Execute a command directly, e.g. /!pwd")
+			fmt.Println("  /!command - Execute a command directly, or use @command, such as @ls")
 			fmt.Println("  ↑/↓       - Browse message history")
 			return nil
 		},
@@ -785,4 +854,283 @@ func formatCodeActions(actions []CodeAction) string {
 	}
 
 	return result.String()
+}
+
+// getDirectoryContent returns a formatted string with directory contents
+func getDirectoryContent(dirPath string, gitignorePatterns []GitIgnorePattern) (string, error) {
+	var result strings.Builder
+
+	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip hidden files/directories
+		if strings.HasPrefix(filepath.Base(path), ".") && path != dirPath {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// 检查是否应该根据 .gitignore 规则忽略此文件
+		if shouldIgnore(path, dirPath, gitignorePatterns) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Calculate relative path from the target directory
+		relPath, err := filepath.Rel(dirPath, path)
+		if err != nil {
+			return err
+		}
+
+		// Skip the root directory itself
+		if relPath == "." {
+			return nil
+		}
+
+		// Create proper indentation based on directory depth
+		indent := strings.Repeat("  ", strings.Count(relPath, string(filepath.Separator)))
+
+		// Add directory indicator for directories
+		if info.IsDir() {
+			result.WriteString(fmt.Sprintf("%s📁 %s\n", indent, filepath.Base(path)))
+		} else {
+			// For files, also show size
+			sizeStr := formatFileSize(info.Size())
+			result.WriteString(fmt.Sprintf("%s📄 %s (%s)\n", indent, filepath.Base(path), sizeStr))
+		}
+
+		return nil
+	})
+
+	return result.String(), err
+}
+
+// formatFileSize returns a human-readable file size
+func formatFileSize(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
+}
+
+// containsModificationKeywords checks if the prompt contains keywords indicating code modification
+func containsModificationKeywords(prompt string) bool {
+	prompt = strings.ToLower(prompt)
+	keywords := []string{
+		"fix", "change", "modify", "update", "add", "implement", "edit",
+		"remove", "delete", "create", "format", "refactor", "optimize",
+		"improve", "rewrite", "clean",
+	}
+
+	for _, keyword := range keywords {
+		if strings.Contains(prompt, keyword) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// processCodeModification handles requests to modify code
+func processCodeModification(client *llm.Client, filePath, content, prompt string) (string, error) {
+	// Construct a prompt for code modification
+	modificationPrompt := fmt.Sprintf(
+		"I have a file %s with the following content:\n\n```\n%s\n```\n\n"+
+			"I want to: %s\n\n"+
+			"Please provide the complete modified file content that addresses this request. "+
+			"Return ONLY the modified code without any explanation or markdown, as I will directly use your output.",
+		filePath, content, prompt,
+	)
+
+	// Send to LLM for modification
+	response, err := client.SendMessage(modificationPrompt)
+	if err != nil {
+		return "", err
+	}
+
+	// Extract code from response (if LLM wrapped it in code blocks)
+	codePattern := regexp.MustCompile("(?s)```(?:\\w+)?\\s*(.+?)\\s*```")
+	matches := codePattern.FindStringSubmatch(response)
+	if len(matches) > 1 {
+		return matches[1], nil
+	}
+
+	// If no code blocks, return the raw response
+	return response, nil
+}
+
+// promptForConfirmation asks the user to confirm code changes
+func promptForConfirmation(rl *readline.Instance) CodeChangeResponse {
+	originalPrompt := rl.Config.Prompt
+	defer func() {
+		rl.SetPrompt(originalPrompt)
+	}()
+
+	rl.SetPrompt("Apply changes? (yes/no/cancel): ")
+
+	for {
+		input, err := rl.Readline()
+		if err != nil {
+			return Cancel
+		}
+
+		input = strings.ToLower(strings.TrimSpace(input))
+
+		if input == "yes" || input == "y" {
+			return Accept
+		} else if input == "no" || input == "n" {
+			return Reject
+		} else if input == "cancel" || input == "c" {
+			return Cancel
+		}
+
+		fmt.Println("Please enter 'yes', 'no', or 'cancel'")
+	}
+}
+
+// readGitIgnore 读取并解析 .gitignore 文件
+func readGitIgnore(rootDir string) ([]GitIgnorePattern, error) {
+	var patterns []GitIgnorePattern
+
+	// 查找 .gitignore 文件
+	gitignorePath := filepath.Join(rootDir, ".gitignore")
+
+	// 检查文件是否存在
+	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
+		// 如果文件不存在，返回空的模式列表
+		return patterns, nil
+	}
+
+	// 读取 .gitignore 文件
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		return nil, fmt.Errorf("error reading .gitignore: %v", err)
+	}
+
+	// 按行解析
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		// 忽略空行和注释
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// 解析模式
+		pattern := GitIgnorePattern{}
+
+		// 检查是否是否定模式 (以 ! 开头)
+		if strings.HasPrefix(line, "!") {
+			pattern.Negated = true
+			line = line[1:]
+		}
+
+		// 检查是否是目录 (以 / 结尾)
+		if strings.HasSuffix(line, "/") {
+			pattern.Directory = true
+			line = line[:len(line)-1]
+		}
+
+		// 删除前导斜杠，gitignore 模式是相对于 git 仓库根目录的
+		if strings.HasPrefix(line, "/") {
+			line = line[1:]
+		}
+
+		pattern.Pattern = line
+		patterns = append(patterns, pattern)
+	}
+
+	return patterns, nil
+}
+
+// shouldIgnore 判断文件是否应该被忽略
+func shouldIgnore(path string, rootDir string, gitignorePatterns []GitIgnorePattern) bool {
+	// 获取相对路径
+	relPath, err := filepath.Rel(rootDir, path)
+	if err != nil {
+		// 如果获取相对路径出错，保守起见不忽略
+		return false
+	}
+
+	// 替换Windows路径分隔符为Unix风格
+	relPath = filepath.ToSlash(relPath)
+
+	// 文件的基本名称（用于部分匹配）
+	baseName := filepath.Base(relPath)
+
+	// 获取文件信息以检查是否是目录
+	fileInfo, err := os.Stat(path)
+	isDir := err == nil && fileInfo.IsDir()
+
+	// 默认不忽略
+	ignored := false
+
+	// 遍历所有模式
+	for _, pattern := range gitignorePatterns {
+		// 准备匹配的模式
+		patternToUse := pattern.Pattern
+
+		// 进行模式特殊处理
+		isMatched := false
+
+		// 检查是否是简单的基本名称匹配
+		if !strings.Contains(patternToUse, "/") {
+			// 如果模式中没有 /，则匹配任何目录下的文件名
+			isMatched = matchGitignorePattern(baseName, patternToUse) ||
+				matchGitignorePattern(relPath, patternToUse)
+		} else {
+			// 如果有 /，则按照 gitignore 的规则匹配
+			isMatched = matchGitignorePattern(relPath, patternToUse)
+		}
+
+		// 处理目录模式的特殊情况
+		if pattern.Directory && isDir {
+			dirPath := relPath + "/"
+			isMatched = isMatched || matchGitignorePattern(dirPath, patternToUse+"/")
+		}
+
+		// 如果匹配成功
+		if isMatched {
+			// 根据是否是否定模式来设置忽略状态
+			if pattern.Negated {
+				ignored = false
+			} else {
+				ignored = true
+			}
+		}
+	}
+
+	return ignored
+}
+
+// matchGitignorePattern 使用类似 gitignore 的规则匹配模式
+func matchGitignorePattern(name, pattern string) bool {
+	// 处理 gitignore 中的特殊通配符
+
+	// 处理 ** 用于匹配任意目录层级
+	pattern = strings.Replace(pattern, "**", ".*", -1)
+
+	// 处理 * 用于匹配除了 / 之外的任意字符
+	pattern = strings.Replace(pattern, "*", "[^/]*", -1)
+
+	// 处理 ? 用于匹配单个字符
+	pattern = strings.Replace(pattern, "?", ".", -1)
+
+	// 转换成正则表达式
+	pattern = "^" + pattern + "$"
+
+	// 使用正则表达式匹配
+	matched, err := regexp.MatchString(pattern, name)
+	return err == nil && matched
 }
