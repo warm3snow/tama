@@ -97,5 +97,5 @@ func createStyledPrinters() (userPrinter, aiPrinter func(string)) {
 		aiStyle.Printf("\nAI: %s\n\n", msg)
 	}
 
-	return
+	return userPrinter, aiPrinter
 }

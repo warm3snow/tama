@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/sergi/go-diff/diffmatchpatch"
 	"github.com/spf13/cobra"
+	"github.com/warm3snow/tama/internal/config"
 	"github.com/warm3snow/tama/internal/llm"
 )
 
@@ -73,7 +73,7 @@ func startCodeAssistant() {
 	errorStyle := color.New(color.FgRed)
 
 	// Show welcome message
-	showCodeWelcomeMessage()
+	showCodeWelcomeMessage(Config)
 
 	// Main interaction loop
 	for {
@@ -233,12 +233,14 @@ func startCodeAssistant() {
 }
 
 // showCodeWelcomeMessage displays the welcome message for the code assistant
-func showCodeWelcomeMessage() {
+func showCodeWelcomeMessage(cfg config.Config) {
 	PrintLogo("Code")
+	modelInfo := color.New(color.FgCyan)
+	modelInfo.Printf("Connected to %s model: %s\n", cfg.Defaults.Provider, cfg.Defaults.Model)
 	fmt.Println("AI-powered coding companion")
 	fmt.Println("Type 'exit' or 'quit' to end the session")
-	fmt.Println("Type '@command' to directly execute terminal commands")
-	fmt.Println("Ask me to analyze, edit, or create code files")
+	fmt.Println("Type '/help' to show available commands")
+	fmt.Println("Type '/!command' to directly execute terminal commands")
 }
 
 // setupSlashCommands registers built-in slash commands
@@ -259,35 +261,11 @@ func setupSlashCommands() map[string]SlashCommand {
 		},
 	}
 
-	commands["ls"] = SlashCommand{
-		Name:        "ls",
-		Description: "List files in current directory",
+	commands["config"] = SlashCommand{
+		Name:        "config",
+		Description: "Show the current configuration",
 		Execute: func() error {
-			files, err := ioutil.ReadDir(".")
-			if err != nil {
-				return err
-			}
-
-			for _, file := range files {
-				if file.IsDir() {
-					fmt.Printf("%s/\n", file.Name())
-				} else {
-					fmt.Println(file.Name())
-				}
-			}
-			return nil
-		},
-	}
-
-	commands["pwd"] = SlashCommand{
-		Name:        "pwd",
-		Description: "Print working directory",
-		Execute: func() error {
-			dir, err := os.Getwd()
-			if err != nil {
-				return err
-			}
-			fmt.Println(dir)
+			showConfig()
 			return nil
 		},
 	}
@@ -297,6 +275,26 @@ func setupSlashCommands() map[string]SlashCommand {
 
 // handleSlashCommand processes commands that start with "/"
 func handleSlashCommand(input string, commands map[string]SlashCommand) bool {
+	// 检查是否是直接执行命令（以/!开头）
+	if strings.HasPrefix(input, "/!") {
+		// 移除/!前缀
+		cmdStr := strings.TrimPrefix(input, "/!")
+		cmdStr = strings.TrimSpace(cmdStr)
+
+		if cmdStr == "" {
+			fmt.Println("Error: No command specified after /!")
+			return true
+		}
+
+		fmt.Printf("\nDirectly executing: %s\n\n", cmdStr)
+
+		err := executeCommand(cmdStr)
+		if err != nil {
+			fmt.Printf("Error executing command: %v\n", err)
+		}
+		return true
+	}
+
 	// Strip the leading "/"
 	cmdName := strings.TrimPrefix(input, "/")
 
