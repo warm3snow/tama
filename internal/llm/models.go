@@ -1,5 +1,14 @@
 package llm
 
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+
+	"github.com/warm3snow/tama/internal/config"
+)
+
 // ChatMessage represents a message in the conversation
 type ChatMessage struct {
 	Role    string `json:"role"`
@@ -48,4 +57,58 @@ type OllamaResponse struct {
 	Context       []int  `json:"context,omitempty"`
 	TotalDuration int64  `json:"total_duration,omitempty"`
 	Error         string `json:"error,omitempty"`
+}
+
+// GetModels returns the available models
+func GetModels(provider config.Provider) ([]string, error) {
+	apiURL := fmt.Sprintf("%s/v1/models", provider.BaseURL)
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get models: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %v", err)
+	}
+
+	// {
+	// 	"object": "list",
+	// 	"data": [
+	// 	  {
+	// 		"id": "qwen2.5-coder:1.5b-base",
+	// 		"object": "model",
+	// 		"created": 1740368924,
+	// 		"owned_by": "library"
+	// 	  },
+	// 	  {
+	// 		"id": "nomic-embed-text:latest",
+	// 		"object": "model",
+	// 		"created": 1740366660,
+	// 		"owned_by": "library"
+	// 	  }
+	// 	]
+	// }
+
+	var response struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Created int    `json:"created"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal models: %v", err)
+	}
+
+	modelNames := make([]string, len(response.Data))
+	for i, model := range response.Data {
+		modelNames[i] = model.ID
+	}
+
+	return modelNames, nil
 }
