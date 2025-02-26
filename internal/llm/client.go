@@ -2,19 +2,20 @@ package llm
 
 import (
 	"fmt"
+
 	"github.com/warm3snow/tama/internal/config"
 )
 
 // Client represents an LLM client
 type Client struct {
-	config config.Config
+	config       config.Config
 	conversation []ChatMessage
 }
 
 // NewClient creates a new LLM client with the given configuration
 func NewClient(cfg config.Config) *Client {
 	return &Client{
-		config: cfg,
+		config:       cfg,
 		conversation: make([]ChatMessage, 0),
 	}
 }
@@ -54,4 +55,31 @@ func (c *Client) GetProvider() string {
 // GetModel returns the current model name
 func (c *Client) GetModel() string {
 	return c.config.Defaults.Model
-} 
+}
+
+// GetModels returns the available models
+func (c *Client) GetModels() ([]string, error) {
+	provider := c.config.Defaults.Provider
+	providerConfig, ok := c.config.Providers[provider]
+	if !ok {
+		return nil, fmt.Errorf("provider %s not configured", provider)
+	}
+
+	switch provider {
+	case "openai":
+		return nil, fmt.Errorf("openai model listing is not supported")
+	case "ollama":
+		return GetModels(providerConfig)
+	default:
+		return nil, fmt.Errorf("unsupported provider: %s", provider)
+	}
+}
+
+// SwitchModel switches the model for the given provider
+func (c *Client) SwitchModel(model string) error {
+	c.config.Defaults.Model = model
+	if err := c.config.SwitchModel(model); err != nil {
+		return err
+	}
+	return nil
+}

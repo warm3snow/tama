@@ -32,13 +32,20 @@ type OllamaRequest struct {
 	MaxTokens   int     `json:"max_tokens,omitempty"`
 }
 
+type ProviderModel struct {
+	Provider    string  `json:"provider"`
+	Model       string  `json:"model"`
+	Temperature float64 `json:"temperature"`
+	MaxTokens   int     `json:"max_tokens"`
+}
+
 // OllamaResponse represents a response from the Ollama API
 type OllamaResponse struct {
-	Model         string   `json:"model"`
-	CreatedAt     string   `json:"created_at"`
-	Response      string   `json:"response"`
-	Done          bool     `json:"done"`
-	Context       []int    `json:"context,omitempty"`
-	TotalDuration int64    `json:"total_duration,omitempty"`
-	Error         string   `json:"error,omitempty"`
-} 
+	Model         string `json:"model"`
+	CreatedAt     string `json:"created_at"`
+	Response      string `json:"response"`
+	Done          bool   `json:"done"`
+	Context       []int  `json:"context,omitempty"`
+	TotalDuration int64  `json:"total_duration,omitempty"`
+	Error         string `json:"error,omitempty"`
+}

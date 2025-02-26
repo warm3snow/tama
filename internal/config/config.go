@@ -16,12 +16,15 @@ type Provider struct {
 // Config represents the application configuration
 type Config struct {
 	Providers map[string]Provider `json:"providers"`
-	Defaults  struct {
-		Provider    string  `json:"provider"`
-		Model       string  `json:"model"`
-		Temperature float64 `json:"temperature"`
-		MaxTokens   int     `json:"max_tokens"`
-	} `json:"defaults"`
+	Defaults  DefaultProvider     `json:"defaults"`
+}
+
+// DefaultProvider represents the default provider configuration
+type DefaultProvider struct {
+	Provider    string  `json:"provider"`
+	Model       string  `json:"model"`
+	Temperature float64 `json:"temperature"`
+	MaxTokens   int     `json:"max_tokens"`
 }
 
 // GetDefaultConfig returns the default configuration
@@ -111,4 +114,17 @@ func (c *Config) SaveToFile(configFile string) error {
 	}
 
 	return nil
+}
+
+// SwitchModel switches the model for the given provider
+func (c *Config) SwitchModel(model string) error {
+	c.Defaults.Model = model
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %v", err)
+	}
+	configFile := filepath.Join(homeDir, ".config", "tama", "config.json")
+
+	return c.SaveToFile(configFile)
 }

@@ -121,7 +121,7 @@ func (c completer) Do(line []rune, pos int) (newLine [][]rune, length int) {
 func startCodeAssistant() {
 	client := llm.NewClient(Config)
 	userStyle, aiStyle := createStyledPrinters()
-	commands := setupSlashCommands()
+	commands := setupSlashCommands(&Config.Defaults, client)
 	cmdStyle := color.New(color.FgYellow).Add(color.Bold)
 	codeStyle := color.New(color.FgGreen)
 	errorStyle := color.New(color.FgRed)
@@ -170,7 +170,7 @@ func startCodeAssistant() {
 
 		// Check if this is a slash command
 		if strings.HasPrefix(input, "/") {
-			cmdHandled, needReset, _ := handleSlashCommand(input, commands)
+			cmdHandled, needReset, _ := handleSlashCommand(input, commands, client)
 			if cmdHandled {
 				// 命令成功执行后添加到历史记录
 				rl.SaveHistory(input)
@@ -415,7 +415,7 @@ func showCodeWelcomeMessage(cfg config.Config) {
 }
 
 // setupSlashCommands registers built-in slash commands
-func setupSlashCommands() map[string]SlashCommand {
+func setupSlashCommands(cfg *config.DefaultProvider, llm *llm.Client) map[string]SlashCommand {
 	commands := make(map[string]SlashCommand)
 
 	commands["help"] = SlashCommand{
@@ -453,6 +453,24 @@ func setupSlashCommands() map[string]SlashCommand {
 		},
 	}
 
+	commands["model"] = SlashCommand{
+		Name:        "model",
+		Description: "Show the current model, or switch by /model <model>",
+		Execute: func() error {
+			fmt.Printf("Current model: %s\n", llm.GetModel())
+			return nil
+		},
+	}
+
+	commands["models"] = SlashCommand{
+		Name:        "models",
+		Description: "Show available models",
+		Execute: func() error {
+			fmt.Println("Available models:")
+			return nil
+		},
+	}
+
 	return commands
 }
 
@@ -461,7 +479,7 @@ func setupSlashCommands() map[string]SlashCommand {
 // - bool: 是否处理了命令
 // - bool: 是否需要重新初始化readline（执行了交互式终端命令）
 // - string: 执行的命令（如果是交互式命令）
-func handleSlashCommand(input string, commands map[string]SlashCommand) (bool, bool, string) {
+func handleSlashCommand(input string, commands map[string]SlashCommand, llm *llm.Client) (bool, bool, string) {
 	// 检查是否是直接执行命令（以/!开头）
 	if strings.HasPrefix(input, "/!") {
 		// 移除/!前缀
@@ -515,6 +533,37 @@ func handleSlashCommand(input string, commands map[string]SlashCommand) (bool, b
 		}
 
 		fmt.Printf("Changed directory to: %s\n", getCurrentDirectory())
+		return true, false, ""
+	}
+
+	if strings.HasPrefix(input, "/models") {
+		fmt.Println("Available models:")
+		models, err := llm.GetModels()
+		if err != nil {
+			fmt.Printf("Error getting models: %v\n", err)
+			return true, false, ""
+		}
+		for _, model := range models {
+			fmt.Println(model)
+		}
+	}
+
+	if strings.HasPrefix(input, "/model ") {
+		// 提取模型名称
+		model := strings.TrimPrefix(input, "/model ")
+		model = strings.TrimSpace(model)
+
+		if model == "" {
+			return true, false, ""
+		}
+
+		if err := llm.SwitchModel(model); err != nil {
+			fmt.Printf("Error switching model: %v\n", err)
+			return true, false, ""
+		}
+
+		fmt.Printf("Model switched to: %s\n", llm.GetModel())
+
 		return true, false, ""
 	}
 
