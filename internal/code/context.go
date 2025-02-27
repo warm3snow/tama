@@ -12,7 +12,7 @@ import (
 //
 //	@file_path [question] - For file context (e.g., @main.go 这段代码的功能是什么?)
 //	@folder_path [question] - For folder context (e.g., @internal/ 这个目录结构如何?)
-//	@codebase [depth=n] [question] - For codebase context
+//	@codebase [depth=n] [question] - For codebase context (e.g., @codebase 分析一下)
 //	@git command [question] - For git commands
 //	@web "search query" [question] - For web search
 func (h *Handler) parseContextRequest(input string) (*ContextRequest, error) {
@@ -52,9 +52,8 @@ func (h *Handler) parseContextRequest(input string) (*ContextRequest, error) {
 
 		// Parse the remaining parts after the context type
 		if remainingText != "" {
-			// For git, the rest might be the command followed by a question
 			if contextType == GitContext {
-				// Try to extract command and question
+				// For git, the rest might be the command followed by a question
 				cmdParts := strings.SplitN(remainingText, " ", 2)
 				request.Command = cmdParts[0]
 
@@ -135,12 +134,18 @@ func (h *Handler) parseContextRequest(input string) (*ContextRequest, error) {
 						}
 					}
 				} else {
-					// No depth parameter, just target and possibly question
-					targetParts := strings.SplitN(remainingText, " ", 2)
-					request.Target = targetParts[0]
+					// No depth parameter, just question (for codebase) or target and question (for others)
+					if contextType == CodebaseContext {
+						// For codebase without depth, entire text is the question
+						request.Question = remainingText
+					} else {
+						// For other types, extract target and question
+						targetParts := strings.SplitN(remainingText, " ", 2)
+						request.Target = targetParts[0]
 
-					if len(targetParts) > 1 {
-						request.Question = strings.TrimSpace(targetParts[1])
+						if len(targetParts) > 1 {
+							request.Question = strings.TrimSpace(targetParts[1])
+						}
 					}
 				}
 			}
