@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -272,13 +273,176 @@ func (h *Handler) getCodebaseContext(depth int) (string, error) {
 		return "", err
 	}
 
-	// Get information about important files
+	// 自动识别和扫描重要文件
 	var importantFiles string
-	for _, file := range []string{"go.mod", "go.sum", "main.go", "README.md"} {
-		if fileInfo, err := os.Stat(file); err == nil && !fileInfo.IsDir() {
-			content, _ := readFile(file)
-			importantFiles += fmt.Sprintf("\n--- %s ---\n%s\n", file, content)
+
+	// 定义要扫描的文件类型（按语言分类）
+	codeFileExtensions := map[string]bool{
+		// Go
+		".go":  true,
+		".mod": true,
+		".sum": true,
+		// Python
+		".py":  true,
+		".pyw": true,
+		".pyx": true,
+		".pxd": true,
+		".pyi": true,
+		// JavaScript/TypeScript
+		".js":  true,
+		".jsx": true,
+		".ts":  true,
+		".tsx": true,
+		// Java
+		".java":  true,
+		".jar":   true,
+		".class": true,
+		// Rust
+		".rs":   true,
+		".rlib": true,
+		// C/C++
+		".c":   true,
+		".cpp": true,
+		".h":   true,
+		".hpp": true,
+		// 配置文件
+		".proto": true,
+		".yaml":  true,
+		".yml":   true,
+		".json":  true,
+		".toml":  true,
+		".ini":   true,
+		".conf":  true,
+	}
+
+	// 定义重要的文件名
+	importantFileNames := map[string]bool{
+		// 文档
+		"README.md":  true,
+		"README.rst": true,
+		"README.txt": true,
+		"LICENSE":    true,
+		// 构建和依赖
+		"Makefile":         true,
+		"setup.py":         true,
+		"requirements.txt": true,
+		"package.json":     true,
+		"Cargo.toml":       true,
+		"CMakeLists.txt":   true,
+		// 容器化
+		"Dockerfile":         true,
+		"docker-compose.yml": true,
+		// 配置文件
+		".gitignore":     true,
+		"tox.ini":        true,
+		"pyproject.toml": true,
+		".env.example":   true,
+	}
+
+	// 读取.gitignore文件
+	gitignorePatterns := make([]string, 0)
+	if gitignoreContent, err := readFile(".gitignore"); err == nil {
+		lines := strings.Split(gitignoreContent, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				gitignorePatterns = append(gitignorePatterns, line)
+			}
 		}
+	}
+
+	// 检查路径是否应该被忽略
+	isIgnored := func(path string) bool {
+		// 始终忽略.git目录
+		if strings.Contains(path, "/.git/") || path == ".git" {
+			return true
+		}
+
+		// 检查是否匹配.gitignore模式
+		for _, pattern := range gitignorePatterns {
+			// 处理通配符模式
+			if strings.HasPrefix(pattern, "*") {
+				suffix := strings.TrimPrefix(pattern, "*")
+				if strings.HasSuffix(path, suffix) {
+					return true
+				}
+			} else if strings.HasSuffix(pattern, "/*") {
+				prefix := strings.TrimSuffix(pattern, "/*")
+				if strings.HasPrefix(path, prefix+"/") {
+					return true
+				}
+			} else if strings.Contains(pattern, "*") {
+				// TODO: 实现更复杂的通配符匹配
+				continue
+			} else {
+				// 直接匹配
+				if path == pattern || strings.HasPrefix(path, pattern+"/") {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// 使用filepath.Walk遍历目录
+	err = filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// 跳过隐藏目录和文件（除了.gitignore等特定文件）
+		if strings.HasPrefix(filepath.Base(path), ".") && path != "." &&
+			!importantFileNames[filepath.Base(path)] {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// 检查是否应该忽略该路径
+		if isIgnored(path) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// 跳过常见的依赖目录
+		if info.IsDir() && (path == "vendor" || path == "node_modules" ||
+			path == "__pycache__" || path == "venv" || path == "env" ||
+			path == "target" || path == "dist" || path == "build") {
+			return filepath.SkipDir
+		}
+
+		// 检查是否是文件
+		if !info.IsDir() {
+			ext := strings.ToLower(filepath.Ext(path))
+			baseName := filepath.Base(path)
+
+			// 检查是否是重要文件名或支持的代码文件类型
+			if importantFileNames[baseName] || codeFileExtensions[ext] {
+				// 读取文件内容
+				content, err := readFile(path)
+				if err != nil {
+					return nil // 继续处理其他文件
+				}
+
+				// 对于较大的文件，只读取前几行
+				if len(content) > 1000 {
+					lines := strings.SplitN(content, "\n", 21)
+					if len(lines) > 20 {
+						content = strings.Join(lines[:20], "\n") + "\n... (file truncated)"
+					}
+				}
+
+				importantFiles += fmt.Sprintf("\n--- %s ---\n%s\n", path, content)
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("failed to walk directory: %v", err)
 	}
 
 	return fmt.Sprintf("Codebase Overview:\n\n%s\n\nImportant Files:%s", rootStructure, importantFiles), nil

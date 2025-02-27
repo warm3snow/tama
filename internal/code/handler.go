@@ -205,6 +205,28 @@ func (h *Handler) processInput(input string) bool {
 					h.cmdStyle.Printf("Added %s context to the conversation: %s\n",
 						contextRequest.Type,
 						getContextSummary(contextRequest))
+
+					// 如果是codebase命令，立即发送上下文信息给LLM
+					if contextRequest.Type == CodebaseContext {
+						// 确保上下文已被处理
+						h.chatHandler.AddSystemMessage("请基于以上代码库上下文回答以下问题。")
+
+						// 如果用户提供了问题，使用该问题，否则使用默认的分析提示
+						analysisPrompt := userQuestion
+						if analysisPrompt == "" {
+							analysisPrompt = "请分析这个代码库的结构和主要功能，包括：\n1. 主要目录结构\n2. 核心功能模块\n3. 关键文件的作用\n4. 项目的主要特点"
+						}
+
+						// 显示用户问题
+						h.userStyle(analysisPrompt)
+
+						// 发送给LLM
+						_, err := h.chatHandler.SendMessage(analysisPrompt)
+						if err != nil {
+							h.errorStyle.Printf("Error: %v\n", err)
+						}
+						return false
+					}
 				} else {
 					// Not a valid context command, treat as regular text
 					nonContextText = append(nonContextText, token)
@@ -257,10 +279,32 @@ func (h *Handler) processInput(input string) bool {
 		message := fmt.Sprintf("Context (%s): %s", contextRequest.Type, contextInfo)
 		h.chatHandler.AddSystemMessage(message)
 
-		// Let the user know that context was loaded without displaying the entire content
+		// Let the user know that context was loaded
 		h.cmdStyle.Printf("Added %s context to the conversation: %s\n",
 			contextRequest.Type,
 			getContextSummary(contextRequest))
+
+		// 如果是codebase命令，立即发送上下文信息给LLM
+		if contextRequest.Type == CodebaseContext {
+			// 确保上下文已被处理
+			h.chatHandler.AddSystemMessage("请基于以上代码库上下文回答以下问题。")
+
+			// 如果用户提供了问题，使用该问题，否则使用默认的分析提示
+			analysisPrompt := contextRequest.Question
+			if analysisPrompt == "" {
+				analysisPrompt = "请分析这个代码库的结构和主要功能，包括：\n1. 主要目录结构\n2. 核心功能模块\n3. 关键文件的作用\n4. 项目的主要特点"
+			}
+
+			// 显示用户问题
+			h.userStyle(analysisPrompt)
+
+			// 发送给LLM
+			_, err := h.chatHandler.SendMessage(analysisPrompt)
+			if err != nil {
+				h.errorStyle.Printf("Error: %v\n", err)
+			}
+			return false
+		}
 
 		// If the user included a question with the context, send it to the LLM
 		if contextRequest.Question != "" {
