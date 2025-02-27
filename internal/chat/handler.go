@@ -53,10 +53,10 @@ func (h *ChatHandler) StartInteractiveChat() error {
 	// Show welcome message
 	h.showWelcomeMessage()
 
-	// 聊天模式特定的命令
+	// Chat mode specific commands
 	chatSpecificCommands := []string{}
 
-	// 初始化readline
+	// Initialize readline
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          "> ",
 		HistoryFile:     "/tmp/tama_chat_history.txt",
@@ -71,7 +71,7 @@ func (h *ChatHandler) StartInteractiveChat() error {
 
 	// Main chat loop
 	for {
-		// 使用readline获取输入
+		// Get input using readline
 		input, err := rl.Readline()
 		if err != nil {
 			if err == readline.ErrInterrupt {
@@ -87,7 +87,6 @@ func (h *ChatHandler) StartInteractiveChat() error {
 		}
 
 		input = strings.TrimSpace(input)
-
 		if input == "" {
 			continue
 		}
@@ -97,7 +96,7 @@ func (h *ChatHandler) StartInteractiveChat() error {
 			break
 		}
 
-		// 检查是否是!命令
+		// Check if it's a ! command
 		if strings.HasPrefix(input, "!") {
 			cmdStr := strings.TrimPrefix(input, "!")
 			cmdStr = strings.TrimSpace(cmdStr)
@@ -107,7 +106,7 @@ func (h *ChatHandler) StartInteractiveChat() error {
 				continue
 			}
 
-			// 使用系统默认的shell输出
+			// Use system default shell for output
 			cmd := exec.Command("sh", "-c", cmdStr)
 			cmd.Stdin = os.Stdin
 			cmd.Stdout = os.Stdout
@@ -121,38 +120,25 @@ func (h *ChatHandler) StartInteractiveChat() error {
 			continue
 		}
 
-		// 添加/help命令
+		// Add /help command
 		if input == "/help" {
 			h.showHelpMessage()
 			continue
 		}
 
-		// Show user input with styling
-		h.userStyle.Printf("\nYou: %s\n", input)
-
-		// Print AI prompt without the response
-		fmt.Print("\nAI: ")
-
-		// Define the callback for streaming responses
-		callback := func(chunk string) {
-			// Print each chunk without newlines to simulate streaming
-			fmt.Print(chunk)
-		}
-
-		// Get response from AI with streaming
-		response, err := h.client.SendMessageWithCallback(input, callback)
+		// Process input and get response
+		response, err := h.client.SendMessage(input)
 		if err != nil {
-			fmt.Printf("\nError: %v\n\n", err)
-			continue
+			return fmt.Errorf("error sending message: %v", err)
 		}
 
-		// Print newlines after the response
-		fmt.Print("\n\n")
+		// Display response
+		h.aiStyle.Printf("\nAI: %s\n\n", response)
 
 		// Update conversation history
 		h.client.UpdateConversation(input, response)
 
-		// 添加到readline历史
+		// Add to readline history
 		rl.SaveHistory(input)
 	}
 

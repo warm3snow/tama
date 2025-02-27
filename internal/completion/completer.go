@@ -5,36 +5,36 @@ import (
 	"strings"
 )
 
-// CommandCompleter 实现了命令自动补全的通用逻辑
+// CommandCompleter implements generic command completion logic
 type CommandCompleter struct {
-	// 允许将来添加不同模式特定的命令
+	// Allow for mode-specific commands to be added in the future
 	SpecificCommands []string
 }
 
-// NewCommandCompleter 创建一个新的命令补全器
+// NewCommandCompleter creates a new command completer
 func NewCommandCompleter(specificCommands []string) *CommandCompleter {
 	return &CommandCompleter{
 		SpecificCommands: specificCommands,
 	}
 }
 
-// DoComplete 实现通用的命令补全逻辑
+// DoComplete implements generic command completion logic
 func (c *CommandCompleter) DoComplete(line []rune, pos int) (newLine [][]rune, length int) {
-	// 获取当前输入前缀
+	// Get current input prefix
 	lineStr := string(line[:pos])
 
-	// 处理!命令的自动补全
+	// Handle auto-completion for ! commands
 	if len(lineStr) >= 1 && lineStr[0] == '!' {
 		return c.completeShellCommands(lineStr[1:])
 	}
 
-	// 普通命令补全 - 只处理/开头的命令
+	// Normal command completion - only handle commands starting with /
 	if len(lineStr) > 0 && lineStr[0] == '/' {
-		// 通用命令 + 特定模式的命令
+		// Common commands + mode-specific commands
 		commands := append([]string{"help"}, c.SpecificCommands...)
 		prefix := lineStr[1:]
 
-		// 根据前缀过滤命令
+		// Filter commands based on prefix
 		var candidates [][]rune
 		for _, cmd := range commands {
 			if strings.HasPrefix(cmd, prefix) {
@@ -46,16 +46,16 @@ func (c *CommandCompleter) DoComplete(line []rune, pos int) (newLine [][]rune, l
 			return nil, 0
 		}
 
-		// 返回前缀长度，保留/前缀
+		// Return prefix length, keeping the / prefix
 		return candidates, len(prefix)
 	}
 
 	return nil, 0
 }
 
-// completeShellCommands 完成shell命令的自动补全
+// completeShellCommands handles shell command auto-completion
 func (c *CommandCompleter) completeShellCommands(cmdPrefix string) (newLine [][]rune, length int) {
-	// 获取系统中所有的可执行命令
+	// Get all executable commands in the system
 	pathEnv := os.Getenv("PATH")
 	if pathEnv == "" {
 		return nil, 0
@@ -64,7 +64,7 @@ func (c *CommandCompleter) completeShellCommands(cmdPrefix string) (newLine [][]
 	paths := strings.Split(pathEnv, ":")
 	var matchingCommands []string
 
-	// 检查每个PATH目录下的可执行文件
+	// Check executable files in each PATH directory
 	for _, path := range paths {
 		files, err := os.ReadDir(path)
 		if err != nil {
@@ -72,24 +72,24 @@ func (c *CommandCompleter) completeShellCommands(cmdPrefix string) (newLine [][]
 		}
 
 		for _, file := range files {
-			// 跳过目录
+			// Skip directories
 			if file.IsDir() {
 				continue
 			}
 
-			// 只匹配以cmdPrefix开头的文件
+			// Only match files starting with cmdPrefix
 			fileName := file.Name()
 			if strings.HasPrefix(fileName, cmdPrefix) {
 				matchingCommands = append(matchingCommands, fileName)
 			}
 
-			// 限制候选数量，避免过多
+			// Limit the number of candidates to avoid overwhelming
 			if len(matchingCommands) > 100 {
 				break
 			}
 		}
 
-		// 如果已经有足够多的候选项，就不再继续查找
+		// Stop searching if we have enough candidates
 		if len(matchingCommands) > 100 {
 			break
 		}
@@ -99,14 +99,14 @@ func (c *CommandCompleter) completeShellCommands(cmdPrefix string) (newLine [][]
 		return nil, 0
 	}
 
-	// 如果只有一个匹配项，返回需要追加的差异部分
+	// If there's only one match, return the difference to append
 	if len(matchingCommands) == 1 {
-		// 只返回未输入的后缀部分
+		// Only return the suffix that hasn't been typed
 		suffix := matchingCommands[0][len(cmdPrefix):]
-		return [][]rune{[]rune(suffix)}, 0 // 长度为0表示不替换任何内容，只追加
+		return [][]rune{[]rune(suffix)}, 0 // Length 0 means don't replace anything, just append
 	}
 
-	// 找到所有匹配项的共同前缀
+	// Find common prefix among all matches
 	commonPrefix := matchingCommands[0]
 	for _, cmd := range matchingCommands[1:] {
 		i := 0
@@ -116,20 +116,20 @@ func (c *CommandCompleter) completeShellCommands(cmdPrefix string) (newLine [][]
 		commonPrefix = commonPrefix[:i]
 	}
 
-	// 如果共同前缀比已输入的前缀长，返回需要追加的部分
+	// If common prefix is longer than input prefix, return the difference
 	if len(commonPrefix) > len(cmdPrefix) {
-		// 只返回未输入的后缀部分
+		// Only return the suffix that hasn't been typed
 		suffix := commonPrefix[len(cmdPrefix):]
-		return [][]rune{[]rune(suffix)}, 0 // 长度为0表示不替换任何内容，只追加
+		return [][]rune{[]rune(suffix)}, 0 // Length 0 means don't replace anything, just append
 	}
 
-	// 如果共同前缀不比已输入的前缀长，则显示所有匹配项
-	// 为了兼容readline的行为，我们需要返回裸命令（没有!前缀）
+	// If common prefix isn't longer than input prefix, show all matches
+	// To match readline behavior, we need to return bare commands (without ! prefix)
 	var candidates [][]rune
 	for _, cmd := range matchingCommands {
 		candidates = append(candidates, []rune(cmd))
 	}
 
-	// 返回前缀的长度，这样readline会替换掉当前命令部分
+	// Return prefix length so readline will replace the current command part
 	return candidates, len(cmdPrefix)
 }

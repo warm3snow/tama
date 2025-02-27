@@ -11,9 +11,9 @@ import (
 // parseContextRequest parses a context command from user input
 // Format:
 //
-//	@file_path [question] - For file context (e.g., @main.go 这段代码的功能是什么?)
-//	@folder_path [question] - For folder context (e.g., @internal/ 这个目录结构如何?)
-//	@codebase [depth=n] [question] - For codebase context (e.g., @codebase 分析一下)
+//	@file_path [question] - For file context (e.g., @main.go What's the purpose of this code?)
+//	@folder_path [question] - For folder context (e.g., @internal/ What's the directory structure?)
+//	@codebase [depth=n] [question] - For codebase context (e.g., @codebase analyze)
 //	@git command [question] - For git commands
 //	@web "search query" [question] - For web search
 func (h *Handler) parseContextRequest(input string) (*ContextRequest, error) {
@@ -273,76 +273,61 @@ func (h *Handler) getCodebaseContext(depth int) (string, error) {
 		return "", err
 	}
 
-	// 自动识别和扫描重要文件
+	// Automatically identify and scan important files
 	var importantFiles string
 
-	// 定义要扫描的文件类型（按语言分类）
-	codeFileExtensions := map[string]bool{
-		// Go
-		".go":  true,
-		".mod": true,
-		".sum": true,
-		// Python
-		".py":  true,
-		".pyw": true,
-		".pyx": true,
-		".pxd": true,
-		".pyi": true,
-		// JavaScript/TypeScript
-		".js":  true,
-		".jsx": true,
-		".ts":  true,
-		".tsx": true,
-		// Java
-		".java":  true,
-		".jar":   true,
-		".class": true,
-		// Rust
-		".rs":   true,
-		".rlib": true,
-		// C/C++
-		".c":   true,
-		".cpp": true,
-		".h":   true,
-		".hpp": true,
-		// 配置文件
-		".proto": true,
-		".yaml":  true,
-		".yml":   true,
-		".json":  true,
-		".toml":  true,
-		".ini":   true,
-		".conf":  true,
+	// Define file types to scan (by language)
+	fileTypes := map[string][]string{
+		"Go":         {".go"},
+		"Python":     {".py"},
+		"JavaScript": {".js", ".jsx", ".ts", ".tsx"},
+		"Java":       {".java"},
+		"C/C++":      {".c", ".cpp", ".h", ".hpp"},
+		"Ruby":       {".rb"},
+		"PHP":        {".php"},
+		"Rust":       {".rs"},
+		"Swift":      {".swift"},
+		"Kotlin":     {".kt"},
 	}
 
-	// 定义重要的文件名
-	importantFileNames := map[string]bool{
-		// 文档
-		"README.md":  true,
-		"README.rst": true,
-		"README.txt": true,
-		"LICENSE":    true,
-		// 构建和依赖
-		"Makefile":         true,
-		"setup.py":         true,
-		"requirements.txt": true,
-		"package.json":     true,
-		"Cargo.toml":       true,
-		"CMakeLists.txt":   true,
-		// 容器化
-		"Dockerfile":         true,
-		"docker-compose.yml": true,
-		// 配置文件
-		".gitignore":     true,
-		"tox.ini":        true,
-		"pyproject.toml": true,
-		".env.example":   true,
+	// Define important filenames (including configuration files)
+	importantFilesNames := []string{
+		// Documentation
+		"README.md",
+		"CONTRIBUTING.md",
+		"LICENSE",
+
+		// Build and dependencies
+		"go.mod",
+		"go.sum",
+		"package.json",
+		"requirements.txt",
+		"Gemfile",
+		"composer.json",
+
+		// Containerization
+		"Dockerfile",
+		"docker-compose.yml",
+
+		// Configuration files
+		".gitignore",
+		".dockerignore",
+		"Makefile",
+		"CMakeLists.txt",
+		".env",
+		"config.json",
+		"config.yaml",
+		"config.yml",
+		"settings.json",
+		"settings.yaml",
+		"settings.yml",
 	}
 
-	// 读取.gitignore文件
-	gitignorePatterns := make([]string, 0)
-	if gitignoreContent, err := readFile(".gitignore"); err == nil {
-		lines := strings.Split(gitignoreContent, "\n")
+	// Read .gitignore file
+	gitignorePatterns := []string{}
+	gitignorePath := filepath.Join(".", ".gitignore")
+	if gitignoreContent, err := os.ReadFile(gitignorePath); err == nil {
+		lines := strings.Split(string(gitignoreContent), "\n")
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
 			if line != "" && !strings.HasPrefix(line, "#") {
@@ -351,83 +336,94 @@ func (h *Handler) getCodebaseContext(depth int) (string, error) {
 		}
 	}
 
-	// 检查路径是否应该被忽略
-	isIgnored := func(path string) bool {
-		// 始终忽略.git目录
-		if strings.Contains(path, "/.git/") || path == ".git" {
+	// Check if path should be ignored
+	shouldIgnore := func(path string) bool {
+		// Always ignore .git directory
+		if strings.Contains(path, "/.git/") || strings.HasSuffix(path, "/.git") {
 			return true
 		}
 
-		// 检查是否匹配.gitignore模式
+		// Check if matches .gitignore patterns
 		for _, pattern := range gitignorePatterns {
-			// 处理通配符模式
-			if strings.HasPrefix(pattern, "*") {
-				suffix := strings.TrimPrefix(pattern, "*")
-				if strings.HasSuffix(path, suffix) {
-					return true
-				}
-			} else if strings.HasSuffix(pattern, "/*") {
-				prefix := strings.TrimSuffix(pattern, "/*")
-				if strings.HasPrefix(path, prefix+"/") {
-					return true
-				}
-			} else if strings.Contains(pattern, "*") {
-				// TODO: 实现更复杂的通配符匹配
-				continue
-			} else {
-				// 直接匹配
-				if path == pattern || strings.HasPrefix(path, pattern+"/") {
+			if matched, _ := filepath.Match(pattern, filepath.Base(path)); matched {
+				return true
+			}
+			// Handle directory patterns
+			if strings.HasSuffix(pattern, "/") {
+				dirPattern := pattern[:len(pattern)-1]
+				if strings.Contains(path, "/"+dirPattern+"/") {
 					return true
 				}
 			}
 		}
+
 		return false
 	}
 
-	// 使用filepath.Walk遍历目录
+	// Use filepath.Walk to traverse the directory
 	err = filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// 跳过隐藏目录和文件（除了.gitignore等特定文件）
-		if strings.HasPrefix(filepath.Base(path), ".") && path != "." &&
-			!importantFileNames[filepath.Base(path)] {
+		// Skip hidden directories and files (except for important files)
+		if strings.HasPrefix(filepath.Base(path), ".") && path != "." {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		// 检查是否应该忽略该路径
-		if isIgnored(path) {
+		// Check if it should be ignored
+		if shouldIgnore(path) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		// 跳过常见的依赖目录
+		// Skip common dependency directories
 		if info.IsDir() && (path == "vendor" || path == "node_modules" ||
 			path == "__pycache__" || path == "venv" || path == "env" ||
 			path == "target" || path == "dist" || path == "build") {
 			return filepath.SkipDir
 		}
 
-		// 检查是否是文件
+		// Check if it's a file
 		if !info.IsDir() {
 			ext := strings.ToLower(filepath.Ext(path))
-			baseName := filepath.Base(path)
 
-			// 检查是否是重要文件名或支持的代码文件类型
-			if importantFileNames[baseName] || codeFileExtensions[ext] {
-				// 读取文件内容
+			// Check if it's an important file name or supported code file type
+			isImportant := false
+			for _, importantFile := range importantFilesNames {
+				if strings.HasSuffix(path, importantFile) {
+					isImportant = true
+					break
+				}
+			}
+
+			// Check if it's a supported code file type
+			isCodeFile := false
+			for _, extensions := range fileTypes {
+				for _, fileExt := range extensions {
+					if ext == fileExt {
+						isCodeFile = true
+						break
+					}
+				}
+				if isCodeFile {
+					break
+				}
+			}
+
+			if isImportant || isCodeFile {
+				// Read file content
 				content, err := readFile(path)
 				if err != nil {
-					return nil // 继续处理其他文件
+					return nil // Continue processing other files
 				}
 
-				// 对于较大的文件，只读取前几行
+				// For large files, only read the first few lines
 				if len(content) > 1000 {
 					lines := strings.SplitN(content, "\n", 21)
 					if len(lines) > 20 {
