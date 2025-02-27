@@ -193,9 +193,28 @@ func extractPathAndPrompt(input string) []string {
 
 // readFile reads the content of a file
 func readFile(path string) (string, error) {
+	// Check if file exists
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+
+	// Check if it's a regular file
+	if fileInfo.IsDir() {
+		return "", fmt.Errorf("%s is a directory, not a file", path)
+	}
+
+	// Check file size (limit to 1MB for safety)
+	const maxSize = 1 * 1024 * 1024 // 1MB
+	if fileInfo.Size() > maxSize {
+		return "", fmt.Errorf("file too large (> 1MB): %s", path)
+	}
+
+	// Read file
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
+
 	return string(content), nil
 }

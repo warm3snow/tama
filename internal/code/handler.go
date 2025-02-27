@@ -148,35 +148,99 @@ func (h *Handler) interactionLoop(rl *readline.Instance) {
 	}
 }
 
-// processInput processes user input and returns true if readline needs to be reset
+// processInput processes user input and returns true if the session should end
 func (h *Handler) processInput(input string) bool {
-	// Check if this is a slash command
-	if strings.HasPrefix(input, "/") {
-		cmdHandled, needReset, _ := h.handleSlashCommand(input)
-		return needReset && cmdHandled
+	// Check if the input is a slash command
+	if isSlashCommand, shouldExit, userInput := h.handleSlashCommand(input); isSlashCommand {
+		if shouldExit {
+			return true
+		}
+		if userInput != "" {
+			input = userInput
+		} else {
+			return false
+		}
 	}
 
-	// Check if this is a code-related request
-	actions, success := h.analyzeCodeRequest(input)
-	if success && len(actions) > 0 {
-		h.handleCodeActions(actions)
-		return false
-	}
-
-	// If all else fails, treat as a regular chat message
-	response, err := h.client.SendMessage(input)
+	// Check if this is a context request (starts with @)
+	contextRequest, err := h.parseContextRequest(input)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		h.errorStyle.Printf("Failed to parse context request: %v\n", err)
 		return false
 	}
 
-	// Display AI response
-	h.aiStyle(response)
+	if contextRequest != nil {
+		// Handle context request
+		contextInfo, err := h.handleContextRequest(contextRequest)
+		if err != nil {
+			h.errorStyle.Printf("Failed to get context: %v\n", err)
+			return false
+		}
 
-	// Update conversation history
-	h.client.UpdateConversation(input, response)
+		// Add context to chat history for subsequent LLM conversations
+		message := fmt.Sprintf("Context (%s): %s", contextRequest.Type, contextInfo)
+		h.chatHandler.AddSystemMessage(message)
+
+		// Let the user know that context was loaded without displaying the entire content
+		h.cmdStyle.Printf("Added %s context to the conversation: %s\n",
+			contextRequest.Type,
+			getContextSummary(contextRequest))
+
+		// If the user included a question with the context, send it to the LLM
+		if contextRequest.Question != "" {
+			// Display the user question
+			h.userStyle(contextRequest.Question)
+
+			// Send the question to the LLM
+			_, err := h.chatHandler.SendMessage(contextRequest.Question)
+			if err != nil {
+				h.errorStyle.Printf("Error: %v\n", err)
+			}
+		}
+
+		return false
+	}
+
+	// Check if the input is a terminal command
+	isCommand, command, err := h.analyzeIfCommand(input)
+	if err != nil {
+		h.errorStyle.Printf("Error analyzing input: %v\n", err)
+		return false
+	}
+
+	if isCommand {
+		h.cmdStyle.Printf("Running command: %s\n", command)
+		if err := executeCommand(command); err != nil {
+			h.errorStyle.Printf("Error executing command: %v\n", err)
+		}
+		return false
+	}
+
+	// Process normal input with the chat handler
+	_, err = h.chatHandler.SendMessage(input)
+	if err != nil {
+		h.errorStyle.Printf("Error: %v\n", err)
+	}
 
 	return false
+}
+
+// getContextSummary provides a user-friendly summary of the context that was added
+func getContextSummary(request *ContextRequest) string {
+	switch request.Type {
+	case FileContext:
+		return fmt.Sprintf("file '%s'", request.Target)
+	case FolderContext:
+		return fmt.Sprintf("folder '%s' (depth: %d)", request.Target, request.Depth)
+	case CodebaseContext:
+		return fmt.Sprintf("codebase structure (depth: %d)", request.Depth)
+	case GitContext:
+		return fmt.Sprintf("git command '%s'", request.Command)
+	case WebContext:
+		return fmt.Sprintf("web search for '%s'", strings.Trim(request.Target, "\"'"))
+	default:
+		return string(request.Type)
+	}
 }
 
 // handleCodeActions processes code actions returned by the LLM

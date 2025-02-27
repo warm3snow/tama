@@ -524,6 +524,16 @@ func (c *Client) UpdateConversation(userMessage, aiResponse string) {
 	}
 }
 
+// AddSystemMessage adds a system message to the conversation history
+func (c *Client) AddSystemMessage(message string) {
+	c.conversation = append(c.conversation, ChatMessage{Role: "system", Content: message})
+
+	// Limit conversation history to prevent token overflow
+	if len(c.conversation) > 10 {
+		c.conversation = c.conversation[len(c.conversation)-10:]
+	}
+}
+
 // GetProvider returns the current provider name
 func (c *Client) GetProvider() string {
 	return c.config.Defaults.Provider

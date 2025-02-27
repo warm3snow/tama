@@ -179,6 +179,12 @@ func (h *ChatHandler) SendMessage(message string) (string, error) {
 	return response, nil
 }
 
+// AddSystemMessage adds a system message to the conversation history
+func (h *ChatHandler) AddSystemMessage(message string) {
+	// Add a new system message to the client's conversation
+	h.client.AddSystemMessage(message)
+}
+
 // showWelcomeMessage displays a welcome message at the start of the chat
 func (h *ChatHandler) showWelcomeMessage() {
 	modelInfo := color.New(color.FgCyan)

@@ -23,12 +23,27 @@ func (h *Handler) setupSlashCommands() map[string]SlashCommand {
 			fmt.Println("\nAvailable commands:")
 
 			// Sort and display commands
-			for _, cmd := range []string{"help", "cd", "!"} {
+			for _, cmd := range []string{
+				"help", "cd", "file", "folder", "codebase", "git", "web", "!",
+			} {
 				if command, ok := commands[cmd]; ok {
 					cmdStyle.Printf("  /%s", command.Name)
 					descStyle.Printf(" - %s\n", command.Description)
 				}
 			}
+
+			// Display context prefixes
+			fmt.Println("\nContext shortcuts (can be used anywhere in your message):")
+			cmdStyle.Printf("  @file <path>")
+			descStyle.Printf(" - View file contents\n")
+			cmdStyle.Printf("  @folder <path> [depth=n]")
+			descStyle.Printf(" - View folder structure\n")
+			cmdStyle.Printf("  @codebase [depth=n]")
+			descStyle.Printf(" - Analyze codebase structure\n")
+			cmdStyle.Printf("  @git <command>")
+			descStyle.Printf(" - Run git command and analyze results\n")
+			cmdStyle.Printf("  @web \"<search query>\"")
+			descStyle.Printf(" - Search the web for information\n")
 
 			return nil
 		},
@@ -44,12 +59,74 @@ func (h *Handler) setupSlashCommands() map[string]SlashCommand {
 		},
 	}
 
+	// File command
+	commands["file"] = SlashCommand{
+		Name:        "file",
+		Description: "View or analyze a file",
+		Execute: func() error {
+			// This is just a help command - actual file operations are done via context requests
+			fmt.Println("\nUse @file <path> to view or analyze a file.")
+			fmt.Println("Example: @file main.go")
+			return nil
+		},
+	}
+
+	// Folder command
+	commands["folder"] = SlashCommand{
+		Name:        "folder",
+		Description: "View folder structure",
+		Execute: func() error {
+			// This is just a help command - actual folder operations are done via context requests
+			fmt.Println("\nUse @folder <path> [depth=n] to view a folder structure.")
+			fmt.Println("Example: @folder ./internal depth=2")
+			return nil
+		},
+	}
+
+	// Codebase command
+	commands["codebase"] = SlashCommand{
+		Name:        "codebase",
+		Description: "Analyze the codebase structure",
+		Execute: func() error {
+			// This is just a help command - actual codebase operations are done via context requests
+			fmt.Println("\nUse @codebase [depth=n] to analyze the codebase structure.")
+			fmt.Println("Example: @codebase depth=3")
+			return nil
+		},
+	}
+
+	// Git command
+	commands["git"] = SlashCommand{
+		Name:        "git",
+		Description: "Run git commands with AI analysis",
+		Execute: func() error {
+			// This is just a help command - actual git operations are done via context requests
+			fmt.Println("\nUse @git <command> to run a git command with AI analysis.")
+			fmt.Println("Example: @git status")
+			fmt.Println("Example: @git log --oneline -n 5")
+			return nil
+		},
+	}
+
+	// Web command
+	commands["web"] = SlashCommand{
+		Name:        "web",
+		Description: "Search the web for information",
+		Execute: func() error {
+			// This is just a help command - actual web operations are done via context requests
+			fmt.Println("\nUse @web \"query\" to search the web for information.")
+			fmt.Println("Example: @web \"golang context switching\"")
+			return nil
+		},
+	}
+
 	// Shell command
 	commands["!"] = SlashCommand{
 		Name:        "!",
 		Description: "Execute a shell command",
 		Execute: func() error {
-			fmt.Println("\nUse the command after ! to execute a shell command")
+			fmt.Println("\nUse /! followed by a shell command to execute it.")
+			fmt.Println("Example: /! ls -la")
 			return nil
 		},
 	}
@@ -57,80 +134,51 @@ func (h *Handler) setupSlashCommands() map[string]SlashCommand {
 	return commands
 }
 
-// handleSlashCommand handles slash commands
+// handleSlashCommand processes slash commands
 func (h *Handler) handleSlashCommand(input string) (bool, bool, string) {
-	// 特殊处理!命令的情况，允许!ls这样的格式
-	if strings.HasPrefix(input, "!") {
-		// 将!后面的部分作为命令参数
-		shellCmd := strings.TrimPrefix(input, "!")
-		shellCmd = strings.TrimSpace(shellCmd)
-		if shellCmd != "" {
-			// 如果!后面直接跟着命令，如!ls
-			// 仅高亮显示命令本身
-			err := executeCommand(shellCmd)
-			if err != nil {
-				fmt.Printf("Error executing command: %v\n", err)
-			}
-			return true, isInteractiveTerminalCommand(shellCmd), ""
-		}
-		return true, false, ""
-	}
-
-	// Split the input into command and arguments
-	parts := strings.SplitN(input, " ", 2)
-	cmdName := strings.TrimPrefix(parts[0], "/")
-	var args string
-	if len(parts) > 1 {
-		args = parts[1]
-	}
-
-	// Check if the command exists
-	cmd, ok := h.commands[cmdName]
-	if !ok {
-		fmt.Printf("\nUnknown command: /%s\n", cmdName)
-		fmt.Println("Type /help to see available commands")
+	if !strings.HasPrefix(input, "/") {
 		return false, false, ""
 	}
 
-	// Special case for CD command with argument
-	if cmdName == "cd" && args != "" {
-		// Change directory
-		targetDir := args
-		err := os.Chdir(targetDir)
-		if err != nil {
-			fmt.Printf("\nError changing directory: %v\n", err)
-			return true, false, ""
-		}
+	// Extract command and arguments
+	parts := strings.SplitN(strings.TrimPrefix(input, "/"), " ", 2)
+	cmdName := parts[0]
 
-		fmt.Printf("\nChanged directory to: %s\n", getCurrentDirectory())
+	// Special case for shell command execution with /!
+	if cmdName == "!" {
+		var shellCmd string
+		if len(parts) > 1 {
+			shellCmd = parts[1]
+			h.cmdStyle.Printf("Running command: %s\n", shellCmd)
+			if err := executeCommand(shellCmd); err != nil {
+				h.errorStyle.Printf("Error executing command: %v\n", err)
+			}
+		} else {
+			h.errorStyle.Printf("No command specified after /!\n")
+		}
 		return true, false, ""
 	}
 
-	// Special case for ! command with argument
-	if cmdName == "!" && args != "" {
-		// Execute shell command
-		err := executeCommand(args)
-		if err != nil {
-			fmt.Printf("Error executing command: %v\n", err)
-		}
-
-		return true, isInteractiveTerminalCommand(args), ""
+	// Handle other commands
+	cmd, ok := h.commands[cmdName]
+	if !ok {
+		h.errorStyle.Printf("Unknown command: /%s\n", cmdName)
+		return true, false, ""
 	}
 
 	// Execute the command
-	err := cmd.Execute()
-	if err != nil {
-		fmt.Printf("\nError executing command: %v\n", err)
+	if err := cmd.Execute(); err != nil {
+		h.errorStyle.Printf("Error executing command: %v\n", err)
 	}
 
 	return true, false, ""
 }
 
-// getCurrentDirectory returns the current working directory
+// getCurrentDirectory gets the current working directory
 func getCurrentDirectory() string {
 	dir, err := os.Getwd()
 	if err != nil {
-		return "unknown"
+		return "Error: Unable to determine current directory"
 	}
 	return dir
 }

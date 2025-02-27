@@ -32,3 +32,24 @@ type CommandAnalysisResponse struct {
 	Command   string `json:"command"`
 	Reason    string `json:"reason"`
 }
+
+// ContextType represents the type of context that can be provided to the code assistant
+type ContextType string
+
+const (
+	// Context types
+	FileContext     ContextType = "file"     // Single file context
+	FolderContext   ContextType = "folder"   // Directory structure context
+	CodebaseContext ContextType = "codebase" // Whole codebase context
+	GitContext      ContextType = "git"      // Git repository context
+	WebContext      ContextType = "web"      // Web search context
+)
+
+// ContextRequest represents a request for additional context
+type ContextRequest struct {
+	Type     ContextType `json:"type"`     // Type of context requested
+	Target   string      `json:"target"`   // Target file/folder/URL/etc.
+	Depth    int         `json:"depth"`    // Depth of context (for folder/codebase)
+	Command  string      `json:"command"`  // Command for git operations
+	Question string      `json:"question"` // User's question about the context
+}
