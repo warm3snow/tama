@@ -20,6 +20,8 @@ var versionCmd = &cobra.Command{
 	Long:  `Display detailed version information about Tama.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrintLogo("Version")
+
+		// Display version information
 		fmt.Println("Tama - Terminal AI Assistant")
 		fmt.Printf("Version: %s\n", Version)
 		fmt.Printf("Build Date: %s\n", BuildDate)

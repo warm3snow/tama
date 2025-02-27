@@ -7,6 +7,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/warm3snow/tama/internal/config"
+	"github.com/warm3snow/tama/internal/logging"
 )
 
 var (
@@ -53,10 +54,23 @@ AI models, execute commands with AI analysis, and more.`,
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 func Execute() {
+	// Initialize logger
+	if err := logging.InitLogger(); err != nil {
+		fmt.Printf("Error initializing logger: %v\n", err)
+		// Continue execution even if logger fails, just without file logging
+	}
+	// Ensure logger is closed on exit
+	defer logging.Close()
+
+	logging.LogAppStart("1.0.0")
+
 	if err := rootCmd.Execute(); err != nil {
+		logging.LogError("Command execution failed", "error", err)
 		fmt.Println(err)
 		os.Exit(1)
 	}
+
+	logging.LogAppExit()
 }
 
 func init() {
@@ -71,6 +85,7 @@ func initConfig() {
 	var err error
 	Config, err = config.LoadConfig(cfgFile)
 	if err != nil {
+		logging.LogError("Failed to load config, using defaults", "error", err)
 		// If config file doesn't exist or has errors, use defaults
 		Config = config.GetDefaultConfig()
 	}

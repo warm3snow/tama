@@ -45,6 +45,8 @@ func GetDefaultConfig() Config {
 	config.Defaults.Model = "llama3.2:latest"
 	config.Defaults.Temperature = 0.7
 	config.Defaults.MaxTokens = 2048
+
+	// Note: Can't use logging here as it's not initialized yet during app startup
 	return config
 }
 
@@ -127,4 +129,34 @@ func (c *Config) SwitchModel(model string) error {
 	configFile := filepath.Join(homeDir, ".config", "tama", "config.json")
 
 	return c.SaveToFile(configFile)
+}
+
+// showConfig displays the contents of the config file
+func ShowConfig() {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("Error: failed to get home directory: %v\n", err)
+		return
+	}
+
+	configDir := filepath.Join(homeDir, ".config", "tama")
+	configPath := filepath.Join(configDir, "config.json")
+
+	// Check if file exists
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		fmt.Printf("Config file not found at %s\n", configPath)
+		fmt.Println("Run 'tama config init' to create a new configuration file.")
+		return
+	}
+
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		fmt.Printf("Error: failed to read config file: %v\n", err)
+		return
+	}
+
+	fmt.Println("--- Tama Configuration File ---")
+	fmt.Printf("File: %s\n\n", configPath)
+	fmt.Println(string(content))
+	fmt.Println("------------------------------")
 }
