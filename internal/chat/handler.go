@@ -11,6 +11,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/warm3snow/tama/internal/completion"
 	"github.com/warm3snow/tama/internal/llm"
+	"github.com/warm3snow/tama/internal/logging"
 )
 
 // ChatHandler manages chat sessions
@@ -152,6 +153,20 @@ func (h *ChatHandler) SendMessage(message string) (string, error) {
 	// Print AI prefix first
 	h.aiStyle.Print("\nAI: ")
 
+	// Log the conversation context before sending
+	conversation := h.client.GetConversation()
+	logging.Logger.Info("Sending message to LLM",
+		"message", message,
+		"contextCount", len(conversation))
+
+	// Log each context message for debugging
+	for i, msg := range conversation {
+		logging.Logger.Debug("Context message",
+			"index", i+1,
+			"role", msg.Role,
+			"content", summarizeContent(msg.Content))
+	}
+
 	// Define the callback for streaming responses
 	callback := func(chunk string) {
 		// Print each chunk with proper formatting
@@ -161,11 +176,17 @@ func (h *ChatHandler) SendMessage(message string) (string, error) {
 	// Get response from AI with streaming
 	response, err := h.client.SendMessageWithCallback(message, callback)
 	if err != nil {
-		return "", err
+		logging.LogError("Failed to get response from LLM", "error", err)
+		return "", fmt.Errorf("failed to get response from LLM: %v", err)
 	}
 
 	// Add extra newlines for clean formatting
 	fmt.Print("\n\n")
+
+	// Log the response for debugging
+	logging.Logger.Debug("Received response from LLM",
+		"responseLength", len(response),
+		"responseSummary", summarizeContent(response))
 
 	// Update conversation history
 	h.client.UpdateConversation(message, response)
@@ -173,10 +194,24 @@ func (h *ChatHandler) SendMessage(message string) (string, error) {
 	return response, nil
 }
 
+// summarizeContent returns a summary of the content (first 50 chars + "..." if longer)
+func summarizeContent(content string) string {
+	if len(content) <= 50 {
+		return content
+	}
+	return content[:50] + "..."
+}
+
 // AddSystemMessage adds a system message to the conversation history
 func (h *ChatHandler) AddSystemMessage(message string) {
-	// Add a new system message to the client's conversation
+	// Clear previous system messages to avoid context confusion
+	h.client.ClearSystemMessages()
+
+	// Add the new system message
 	h.client.AddSystemMessage(message)
+
+	logging.Logger.Info("Added system message to conversation",
+		"content", summarizeContent(message))
 }
 
 // showWelcomeMessage displays a welcome message at the start of the chat

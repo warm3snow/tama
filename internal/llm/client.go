@@ -609,3 +609,24 @@ func (c *Client) SwitchModel(model string) error {
 	}
 	return nil
 }
+
+// GetConversation returns the current conversation history
+func (c *Client) GetConversation() []ChatMessage {
+	return c.conversation
+}
+
+// ClearSystemMessages removes all system messages from the conversation history
+func (c *Client) ClearSystemMessages() {
+	// Create a new slice to hold non-system messages
+	newMessages := make([]ChatMessage, 0)
+
+	// Keep only non-system messages
+	for _, msg := range c.conversation {
+		if msg.Role != "system" {
+			newMessages = append(newMessages, msg)
+		}
+	}
+
+	// Update the conversation with filtered messages
+	c.conversation = newMessages
+}
