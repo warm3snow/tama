@@ -141,18 +141,15 @@ func (h *ChatHandler) StartInteractiveChat() error {
 		}
 
 		// Process input and get response
-		response, err := h.client.SendMessage(input)
+		h.userStyle.Printf("\nYou: %s\n", input)
+		h.aiStyle.Print("\nAI: ")
+		_, err = h.client.SendMessageWithCallback(input, func(chunk string) {
+			fmt.Print(chunk)
+		})
 		if err != nil {
 			return fmt.Errorf("error sending message: %v", err)
 		}
-
-		// Display response (if not already displayed by streaming)
-		if !h.isInteractive {
-			h.aiStyle.Printf("\nAI: %s\n\n", response)
-		}
-
-		// Update conversation history
-		h.client.UpdateConversation(input, response)
+		fmt.Print("\n\n")
 
 		// Add to readline history
 		rl.SaveHistory(input)
