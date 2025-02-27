@@ -162,7 +162,83 @@ func (h *Handler) processInput(input string) bool {
 		}
 	}
 
-	// Check if this is a context request (starts with @)
+	// Check if input contains multiple @ commands
+	if strings.Contains(input, " @") || strings.HasPrefix(input, "@") {
+		// Split input by spaces to handle each potential command
+		tokens := strings.Fields(input)
+		var userQuestion string
+		var nonContextText []string
+
+		// Process each token that might be a context command
+		for _, token := range tokens {
+			if strings.HasPrefix(token, "@") {
+				// This is a potential context command
+				contextRequest, err := h.parseContextRequest(token)
+				if err != nil {
+					h.errorStyle.Printf("Failed to parse context request: %v\n", err)
+					nonContextText = append(nonContextText, token)
+					continue
+				}
+
+				if contextRequest != nil {
+					// Extract the question if any
+					if contextRequest.Question != "" {
+						// Use the last question found
+						userQuestion = contextRequest.Question
+						// Clear the question so it doesn't get processed multiple times
+						contextRequest.Question = ""
+					}
+
+					// Handle context request
+					contextInfo, err := h.handleContextRequest(contextRequest)
+					if err != nil {
+						h.errorStyle.Printf("Failed to get context: %v\n", err)
+						nonContextText = append(nonContextText, token)
+						continue
+					}
+
+					// Add context to chat history for subsequent LLM conversations
+					message := fmt.Sprintf("Context (%s): %s", contextRequest.Type, contextInfo)
+					h.chatHandler.AddSystemMessage(message)
+
+					// Let the user know that context was loaded
+					h.cmdStyle.Printf("Added %s context to the conversation: %s\n",
+						contextRequest.Type,
+						getContextSummary(contextRequest))
+				} else {
+					// Not a valid context command, treat as regular text
+					nonContextText = append(nonContextText, token)
+				}
+			} else {
+				// Not a context command, add to non-context text
+				nonContextText = append(nonContextText, token)
+			}
+		}
+
+		// If there's any non-context text, use it as the question
+		if len(nonContextText) > 0 {
+			combinedText := strings.Join(nonContextText, " ")
+			if strings.TrimSpace(combinedText) != "" {
+				userQuestion = strings.TrimSpace(combinedText)
+			}
+		}
+
+		// If we have a question to ask, send it to the LLM
+		if userQuestion != "" {
+			// Display the user question
+			h.userStyle(userQuestion)
+
+			// Send the question to the LLM
+			_, err := h.chatHandler.SendMessage(userQuestion)
+			if err != nil {
+				h.errorStyle.Printf("Error: %v\n", err)
+			}
+		}
+
+		return false
+	}
+
+	// Check if this is a single context request (processed as before)
 	contextRequest, err := h.parseContextRequest(input)
 	if err != nil {
 		h.errorStyle.Printf("Failed to parse context request: %v\n", err)
