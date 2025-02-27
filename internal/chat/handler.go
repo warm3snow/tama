@@ -132,8 +132,10 @@ func (h *ChatHandler) StartInteractiveChat() error {
 			return fmt.Errorf("error sending message: %v", err)
 		}
 
-		// Display response
-		h.aiStyle.Printf("\nAI: %s\n\n", response)
+		// Display response (if not already displayed by streaming)
+		if !h.isInteractive {
+			h.aiStyle.Printf("\nAI: %s\n\n", response)
+		}
 
 		// Update conversation history
 		h.client.UpdateConversation(input, response)
@@ -147,10 +149,13 @@ func (h *ChatHandler) StartInteractiveChat() error {
 
 // SendMessage sends a single message and returns the response
 func (h *ChatHandler) SendMessage(message string) (string, error) {
+	// Print AI prefix first
+	h.aiStyle.Print("\nAI: ")
+
 	// Define the callback for streaming responses
 	callback := func(chunk string) {
-		// Print each chunk without newlines to simulate streaming
-		fmt.Print(chunk)
+		// Print each chunk with proper formatting
+		h.aiStyle.Printf("%s", chunk)
 	}
 
 	// Get response from AI with streaming
@@ -158,6 +163,9 @@ func (h *ChatHandler) SendMessage(message string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	// Add extra newlines for clean formatting
+	fmt.Print("\n\n")
 
 	// Update conversation history
 	h.client.UpdateConversation(message, response)

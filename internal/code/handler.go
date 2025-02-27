@@ -321,20 +321,20 @@ func (h *Handler) processInput(input string) bool {
 		return false
 	}
 
-	// Check if the input is a terminal command
-	isCommand, command, err := h.analyzeIfCommand(input)
-	if err != nil {
-		h.errorStyle.Printf("Error analyzing command: %v\n", err)
-		return false
-	}
+	// // Check if the input is a terminal command
+	// isCommand, command, err := h.analyzeIfCommand(input)
+	// if err != nil {
+	// 	h.errorStyle.Printf("Error analyzing command: %v\n", err)
+	// 	return false
+	// }
 
-	if isCommand {
-		h.cmdStyle.Printf("Running command: %s\n", command)
-		if err := executeCommand(command); err != nil {
-			h.errorStyle.Printf("Error executing command: %v\n", err)
-		}
-		return false
-	}
+	// if isCommand {
+	// 	h.cmdStyle.Printf("Running command: %s\n", command)
+	// 	if err := executeCommand(command); err != nil {
+	// 		h.errorStyle.Printf("Error executing command: %v\n", err)
+	// 	}
+	// 	return false
+	// }
 
 	// Process normal input with the chat handler
 	_, err = h.chatHandler.SendMessage(input)
