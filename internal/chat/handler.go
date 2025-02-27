@@ -20,18 +20,21 @@ type ChatHandler struct {
 	isInteractive bool
 	userStyle     *color.Color
 	aiStyle       *color.Color
+	cmdStyle      *color.Color
 }
 
 // NewChatHandler creates a new chat handler
 func NewChatHandler(client *llm.Client, isInteractive bool) *ChatHandler {
 	userStyle := color.New(color.FgGreen).Add(color.Bold)
 	aiStyle := color.New(color.FgBlue)
+	cmdStyle := color.New(color.FgYellow).Add(color.Bold)
 
 	return &ChatHandler{
 		client:        client,
 		isInteractive: isInteractive,
 		userStyle:     userStyle,
 		aiStyle:       aiStyle,
+		cmdStyle:      cmdStyle,
 	}
 }
 
@@ -55,7 +58,10 @@ func (h *ChatHandler) StartInteractiveChat() error {
 	h.showWelcomeMessage()
 
 	// Chat mode specific commands
-	chatSpecificCommands := []string{}
+	chatSpecificCommands := []string{
+		"/help",
+		"/reset",
+	}
 
 	// Initialize readline
 	rl, err := readline.NewEx(&readline.Config{
@@ -95,6 +101,13 @@ func (h *ChatHandler) StartInteractiveChat() error {
 		if input == "exit" || input == "quit" {
 			fmt.Println("Goodbye!")
 			break
+		}
+
+		// Handle /reset command
+		if input == "/reset" {
+			h.client.ResetConversation()
+			h.cmdStyle.Printf("\nConversation has been reset.\n")
+			continue
 		}
 
 		// Check if it's a ! command
@@ -150,6 +163,11 @@ func (h *ChatHandler) StartInteractiveChat() error {
 
 // SendMessage sends a single message and returns the response
 func (h *ChatHandler) SendMessage(message string) (string, error) {
+	// Display user message if in non-interactive mode
+	if !h.isInteractive {
+		h.userStyle.Printf("\nYou: %s\n", message)
+	}
+
 	// Print AI prefix first
 	h.aiStyle.Print("\nAI: ")
 
@@ -235,6 +253,9 @@ func (h *ChatHandler) showHelpMessage() {
 	// Display commands
 	cmdStyle.Printf("  /help")
 	descStyle.Printf(" - Display available commands\n")
+
+	cmdStyle.Printf("  /reset")
+	descStyle.Printf(" - Reset conversation history\n")
 
 	cmdStyle.Printf("  !")
 	descStyle.Printf(" - Execute a shell command\n")

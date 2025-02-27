@@ -23,10 +23,10 @@ func (h *Handler) setupSlashCommands() map[string]SlashCommand {
 
 			// Sort and display commands
 			for _, cmd := range []string{
-				"help", "!", "@",
+				"help", "!", "@", "reset",
 			} {
 				if command, ok := commands[cmd]; ok {
-					if cmd == "help" {
+					if cmd == "help" || cmd == "reset" {
 						cmdStyle.Printf("  /%s", command.Name)
 					} else {
 						cmdStyle.Printf("  %s", command.Name)
@@ -35,7 +35,7 @@ func (h *Handler) setupSlashCommands() map[string]SlashCommand {
 				}
 			}
 
-			// Display context prefixes
+			// Display context shortcuts
 			fmt.Println("\nContext shortcuts (can be used anywhere in your message):")
 			cmdStyle.Printf("  @file_name")
 			descStyle.Printf(" - File as context\n")
@@ -46,6 +46,17 @@ func (h *Handler) setupSlashCommands() map[string]SlashCommand {
 			cmdStyle.Printf("  @web")
 			descStyle.Printf(" - Enable web browsing\n")
 
+			return nil
+		},
+	}
+
+	// Reset command
+	commands["reset"] = SlashCommand{
+		Name:        "reset",
+		Description: "Reset conversation history",
+		Execute: func() error {
+			h.client.ResetConversation()
+			h.cmdStyle.Printf("\nConversation has been reset.\n")
 			return nil
 		},
 	}

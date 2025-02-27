@@ -615,6 +615,12 @@ func (c *Client) GetConversation() []ChatMessage {
 	return c.conversation
 }
 
+// ResetConversation clears all conversation history
+func (c *Client) ResetConversation() {
+	c.conversation = make([]ChatMessage, 0)
+	logging.Logger.Info("Conversation history has been reset")
+}
+
 // ClearSystemMessages removes all system messages from the conversation history
 func (c *Client) ClearSystemMessages() {
 	// Create a new slice to hold non-system messages
