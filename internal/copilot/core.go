@@ -47,6 +47,43 @@ type AgentState struct {
 	LastActivity   time.Time
 }
 
+// DecisionPhase represents the current phase of decision making
+type DecisionPhase string
+
+const (
+	PhaseAnalysis     DecisionPhase = "analysis"     // Initial analysis of the prompt
+	PhaseContext      DecisionPhase = "context"      // Context gathering
+	PhaseModification DecisionPhase = "modification" // Code modification
+	PhaseVerification DecisionPhase = "verification" // Verification and testing
+)
+
+// Decision represents an LLM's decision about how to handle the prompt
+type Decision struct {
+	Phase     DecisionPhase
+	Action    string
+	Reasoning string
+	Context   []string // Required context files/directories
+	Tools     []string // Required tools
+	Changes   []Change // Proposed changes
+}
+
+// ConfirmationStatus represents the user's response to proposed changes
+type ConfirmationStatus string
+
+const (
+	StatusPending  ConfirmationStatus = "pending"
+	StatusAccepted ConfirmationStatus = "accepted"
+	StatusRejected ConfirmationStatus = "rejected"
+)
+
+// ChangeConfirmation represents a user's confirmation of changes
+type ChangeConfirmation struct {
+	Status    ConfirmationStatus
+	Changes   []Change
+	Timestamp time.Time
+	Comment   string
+}
+
 // Copilot orchestrates the interaction between user, LLM, and tools
 type Copilot struct {
 	ctx       context.Context
@@ -76,6 +113,7 @@ func New(cfg config.Config) *Copilot {
 	tr.RegisterTool(tools.NewGrepSearchTool(ws.GetWorkspacePath()))
 	tr.RegisterTool(tools.NewRunTerminalTool(ws.GetWorkspacePath()))
 	tr.RegisterTool(tools.NewGitTool(ws.GetWorkspacePath()))
+	tr.RegisterTool(tools.NewFileSystemTool(ws.GetWorkspacePath()))
 
 	// Create style colors
 	userStyle := color.New(color.FgGreen).Add(color.Bold)
@@ -219,24 +257,30 @@ func (c *Copilot) ProcessPrompt(prompt string) (<-chan string, error) {
 	// Get available tools descriptions
 	toolDescs := c.tools.GetToolDescriptions()
 
-	// Create system message with tools
-	systemMsg := fmt.Sprintf(`You are a powerful AI coding assistant. You have access to various tools to help with coding tasks.
-Your responses should follow this format:
+	// Create system message with enhanced decision making
+	systemMsg := fmt.Sprintf(`You are a powerful AI coding assistant. You will process requests in distinct phases:
 
-1. First, explain your thinking process and what you plan to do
-2. Then, if you need to create or modify files, explain the changes you'll make
-3. Finally, execute the necessary actions using the tools available to you
+1. Analysis Phase:
+   - Understand the user's request
+   - Determine required tools and context
+   - Plan the implementation strategy
 
-When writing code:
-- Always add necessary imports
-- Ensure the code is complete and can run
-- Follow best practices and conventions
-- Add helpful comments to explain complex logic
+2. Context Gathering Phase:
+   - Collect relevant code context
+   - Analyze dependencies
+   - Understand the current state
 
-Important:
-- Always use edit_file tool to make code changes
-- Always use git tool to show changes
-- Start each response with "Task: <brief task description>"
+3. Modification Phase:
+   - Propose specific code changes
+   - Use appropriate tools to implement changes
+   - Maintain code quality and consistency
+
+4. Verification Phase:
+   - Verify changes meet requirements
+   - Run tests if applicable
+   - Present changes for user confirmation
+
+For each action, explain your reasoning and wait for user confirmation before proceeding.
 
 Available tools:
 %s
@@ -250,6 +294,25 @@ Current workspace: %s
 	// Process in background
 	go func() {
 		defer close(respChan)
+
+		// First, get the initial decision
+		decision, err := c.getInitialDecision(prompt)
+		if err != nil {
+			respChan <- fmt.Sprintf("Error analyzing prompt: %v", err)
+			return
+		}
+
+		// Process based on the decision
+		switch decision.Phase {
+		case PhaseAnalysis:
+			c.handleAnalysisPhase(decision, respChan)
+		case PhaseContext:
+			c.handleContextPhase(decision, respChan)
+		case PhaseModification:
+			c.handleModificationPhase(decision, respChan)
+		case PhaseVerification:
+			c.handleVerificationPhase(decision, respChan)
+		}
 
 		// Create callback for streaming responses
 		callback := func(chunk string) {
@@ -678,5 +741,332 @@ func (c *Copilot) showProgress() {
 		fmt.Printf("Status: %s\n", c.agent.CurrentTask.Status)
 		duration := time.Since(c.agent.CurrentTask.StartTime).Round(time.Second)
 		fmt.Printf("Duration: %s\n", duration)
+	}
+}
+
+// getInitialDecision analyzes the prompt and returns the initial decision
+func (c *Copilot) getInitialDecision(prompt string) (*Decision, error) {
+	// Create analysis prompt
+	analysisPrompt := fmt.Sprintf(`Analyze the following request and determine the best approach:
+Request: %s
+
+You must respond in the following format exactly:
+Phase: [analysis/context/modification/verification]
+Action: [specific action to take]
+Reasoning: [why this approach]
+Context: [comma-separated list of files/directories needed]
+Tools: [comma-separated list of tools needed]
+Changes: [list of file changes in the format: filepath|description]
+
+Example response:
+Phase: modification
+Action: Add error handling to the main function
+Reasoning: The code needs better error handling
+Context: cmd/main.go, internal/errors/errors.go
+Tools: filesystem,git
+Changes: cmd/main.go|Add try-catch block around main logic
+`, prompt)
+
+	// Get LLM response
+	var response strings.Builder
+	callback := func(chunk string) {
+		response.WriteString(chunk)
+	}
+
+	// Send message with callback
+	_, err := c.llm.SendMessageWithCallback(analysisPrompt, callback)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get initial decision: %v", err)
+	}
+
+	// Parse response into Decision struct
+	decision := &Decision{}
+
+	// Split response into lines
+	lines := strings.Split(response.String(), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		switch key {
+		case "Phase":
+			decision.Phase = DecisionPhase(value)
+		case "Action":
+			decision.Action = value
+		case "Reasoning":
+			decision.Reasoning = value
+		case "Context":
+			if value != "" {
+				decision.Context = strings.Split(value, ",")
+				// Trim spaces
+				for i := range decision.Context {
+					decision.Context[i] = strings.TrimSpace(decision.Context[i])
+				}
+			}
+		case "Tools":
+			if value != "" {
+				decision.Tools = strings.Split(value, ",")
+				// Trim spaces
+				for i := range decision.Tools {
+					decision.Tools[i] = strings.TrimSpace(decision.Tools[i])
+				}
+			}
+		case "Changes":
+			if value != "" {
+				// Split multiple changes
+				changesList := strings.Split(value, "\n")
+				for _, change := range changesList {
+					if change == "" {
+						continue
+					}
+					// Split filepath and description
+					changeParts := strings.Split(change, "|")
+					if len(changeParts) == 2 {
+						decision.Changes = append(decision.Changes, Change{
+							FilePath:    strings.TrimSpace(changeParts[0]),
+							Description: strings.TrimSpace(changeParts[1]),
+							Timestamp:   time.Now(),
+						})
+					}
+				}
+			}
+		}
+	}
+
+	return decision, nil
+}
+
+// handleAnalysisPhase processes the analysis phase
+func (c *Copilot) handleAnalysisPhase(decision *Decision, respChan chan<- string) {
+	respChan <- fmt.Sprintf("Analysis:\n%s\n\nProposed action:\n%s\n",
+		decision.Reasoning, decision.Action)
+
+	// Gather required context
+	for _, contextPath := range decision.Context {
+		if content, err := c.workspace.ReadFile(contextPath); err == nil {
+			respChan <- fmt.Sprintf("\nRelevant context from %s:\n%s\n", contextPath, content)
+		}
+	}
+}
+
+// handleContextPhase processes the context gathering phase
+func (c *Copilot) handleContextPhase(decision *Decision, respChan chan<- string) {
+	respChan <- "Gathering context...\n"
+
+	// Use workspace tools to gather context
+	for _, toolName := range decision.Tools {
+		if t := c.tools.GetTool(toolName); t != nil {
+			result, err := t.Execute(c.ctx, map[string]interface{}{
+				"operation": "read",
+			})
+			if err != nil {
+				respChan <- fmt.Sprintf("\nError from %s: %v\n", toolName, err)
+				continue
+			}
+			if result != "" {
+				respChan <- fmt.Sprintf("\nContext from %s:\n%s\n", toolName, result)
+			}
+		}
+	}
+}
+
+// handleModificationPhase processes the modification phase
+func (c *Copilot) handleModificationPhase(decision *Decision, respChan chan<- string) {
+	respChan <- "Implementing changes...\n"
+
+	// Apply each proposed change
+	for _, change := range decision.Changes {
+		respChan <- fmt.Sprintf("\nProcessing change for %s:\n%s\n", change.FilePath, change.Description)
+
+		// Create backup using filesystem tool
+		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
+			backupPath, err := fsTool.Execute(c.ctx, map[string]interface{}{
+				"operation": "backup",
+				"path":      change.FilePath,
+			})
+			if err != nil {
+				respChan <- fmt.Sprintf("\nWarning: Failed to create backup: %v\n", err)
+			} else {
+				change.Backup = backupPath
+				respChan <- fmt.Sprintf("Created backup at: %s\n", backupPath)
+			}
+		}
+
+		// Get current file content if it exists
+		var currentContent string
+		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
+			content, err := fsTool.Execute(c.ctx, map[string]interface{}{
+				"operation": "read",
+				"path":      change.FilePath,
+			})
+			if err == nil {
+				currentContent = content
+			}
+		}
+
+		// Generate the modified content using LLM
+		modificationPrompt := fmt.Sprintf(`Given the current file content and the proposed change, generate the complete modified content.
+Current content:
+%s
+
+Proposed change:
+%s
+
+Provide the complete modified content that can be written to the file:
+`, currentContent, change.Description)
+
+		var modifiedContent strings.Builder
+		callback := func(chunk string) {
+			modifiedContent.WriteString(chunk)
+		}
+
+		_, err := c.llm.SendMessageWithCallback(modificationPrompt, callback)
+		if err != nil {
+			respChan <- fmt.Sprintf("\nError generating modified content: %v\n", err)
+			continue
+		}
+
+		// Apply change using filesystem tool
+		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
+			result, err := fsTool.Execute(c.ctx, map[string]interface{}{
+				"operation": "write",
+				"path":      change.FilePath,
+				"content":   modifiedContent.String(),
+			})
+			if err != nil {
+				respChan <- fmt.Sprintf("\nError applying change to %s: %v\n", change.FilePath, err)
+				continue
+			}
+			respChan <- fmt.Sprintf("Applied change: %s\n", result)
+		}
+
+		// Add to git if available
+		if gitTool := c.tools.GetTool("git"); gitTool != nil {
+			_, err := gitTool.Execute(c.ctx, map[string]interface{}{
+				"operation": "add",
+				"path":      change.FilePath,
+			})
+			if err != nil {
+				respChan <- fmt.Sprintf("\nWarning: Failed to add to git: %v\n", err)
+			} else {
+				respChan <- "Added to git staging area\n"
+			}
+		}
+	}
+}
+
+// handleVerificationPhase processes the verification phase
+func (c *Copilot) handleVerificationPhase(decision *Decision, respChan chan<- string) {
+	respChan <- "Verifying changes...\n"
+
+	// Show git diff
+	if gitTool := c.tools.GetTool("git"); gitTool != nil {
+		diff, err := gitTool.Execute(c.ctx, map[string]interface{}{
+			"operation": "diff",
+		})
+		if err != nil {
+			respChan <- fmt.Sprintf("\nError getting changes: %v\n", err)
+		} else if diff != "" {
+			respChan <- fmt.Sprintf("\nProposed changes:\n%s\n", diff)
+		}
+	}
+
+	respChan <- "\nPlease review the changes and confirm (yes/no): "
+}
+
+// HandleConfirmation processes the user's confirmation response
+func (c *Copilot) HandleConfirmation(confirmation string, changes []Change) (*ChangeConfirmation, error) {
+	conf := &ChangeConfirmation{
+		Changes:   changes,
+		Timestamp: time.Now(),
+	}
+
+	// Process user response
+	switch strings.ToLower(strings.TrimSpace(confirmation)) {
+	case "yes", "y":
+		conf.Status = StatusAccepted
+		// Commit changes if git is available
+		if gitTool := c.tools.GetTool("git"); gitTool != nil {
+			_, err := gitTool.Execute(c.ctx, map[string]interface{}{
+				"operation": "commit",
+				"message":   "Apply accepted changes",
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to commit changes: %v", err)
+			}
+		}
+		// Remove backups
+		for _, change := range changes {
+			if change.Backup != "" {
+				os.Remove(change.Backup)
+			}
+		}
+
+	case "no", "n":
+		conf.Status = StatusRejected
+		// Restore from backups
+		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
+			for _, change := range changes {
+				if change.Backup != "" {
+					_, err := fsTool.Execute(c.ctx, map[string]interface{}{
+						"operation":   "restore",
+						"path":        change.FilePath,
+						"backup_path": change.Backup,
+					})
+					if err != nil {
+						return nil, fmt.Errorf("failed to restore %s: %v", change.FilePath, err)
+					}
+					// Remove backup after restore
+					os.Remove(change.Backup)
+				}
+			}
+		}
+		// Reset git changes if available
+		if gitTool := c.tools.GetTool("git"); gitTool != nil {
+			_, err := gitTool.Execute(c.ctx, map[string]interface{}{
+				"operation": "reset",
+				"hard":      true,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to reset changes: %v", err)
+			}
+		}
+
+	default:
+		return nil, fmt.Errorf("invalid confirmation response: %s", confirmation)
+	}
+
+	return conf, nil
+}
+
+// UpdateTaskState updates the current task state with confirmation results
+func (c *Copilot) UpdateTaskState(conf *ChangeConfirmation) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.agent.CurrentTask != nil {
+		switch conf.Status {
+		case StatusAccepted:
+			c.agent.CurrentTask.Status = "completed"
+			c.agent.CurrentTask.Changes = conf.Changes
+			c.agent.CurrentTask.EndTime = conf.Timestamp
+
+		case StatusRejected:
+			c.agent.CurrentTask.Status = "rejected"
+			c.agent.CurrentTask.EndTime = conf.Timestamp
+		}
+
+		// Move current task to completed tasks
+		c.agent.CompletedTasks = append(c.agent.CompletedTasks, *c.agent.CurrentTask)
+		c.agent.CurrentTask = nil
 	}
 }
