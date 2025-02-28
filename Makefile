@@ -14,17 +14,17 @@ BINARY_UNIX=$(BINARY_NAME)_unix
 VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0")
 BUILD_DATE=$(shell date -u '+%Y-%m-%d %H:%M:%S')
 GIT_COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-LDFLAGS=-ldflags "-X github.com/warm3snow/tama/cmd.Version=${VERSION} -X github.com/warm3snow/tama/cmd.BuildDate=${BUILD_DATE} -X github.com/warm3snow/tama/cmd.GitCommit=${GIT_COMMIT}"
+LDFLAGS=-ldflags "-X 'github.com/warm3snow/tama/cmd.Version=$(VERSION)' -X 'github.com/warm3snow/tama/cmd.BuildDate=$(BUILD_DATE)' -X 'github.com/warm3snow/tama/cmd.GitCommit=$(GIT_COMMIT)'"
 
 .PHONY: all build clean install test build-linux help version
 
 all: build
 
 build:
-	$(GOBUILD) -o $(BINARY_NAME) $(LDFLAGS) -v
+	$(GOBUILD) $(LDFLAGS) -o $(BINARY_NAME) .
 
 install:
-	$(GOINSTALL) -v ./...
+	$(GOINSTALL) $(LDFLAGS) ./...
 
 test:
 	$(GOTEST) -v ./...
@@ -35,7 +35,7 @@ clean:
 	rm -f $(BINARY_UNIX)
 
 build-linux:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GOBUILD) -o $(BINARY_UNIX) $(LDFLAGS) -v
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BINARY_UNIX) .
 
 help:
 	@echo "Make targets:"
