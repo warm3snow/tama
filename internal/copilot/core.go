@@ -18,11 +18,19 @@ import (
 	"github.com/warm3snow/tama/internal/workspace"
 )
 
+// Change represents a single file change
+type Change struct {
+	FilePath    string
+	Description string
+	Timestamp   time.Time
+	Backup      string // Path to backup file
+}
+
 // AgentState represents the current state of the agent
 type AgentState struct {
 	Goal        string
 	CurrentTask string
-	Changes     []string
+	Changes     []Change
 	StartTime   time.Time
 }
 
@@ -54,6 +62,7 @@ func New(cfg config.Config) *Copilot {
 	tr.RegisterTool(tools.NewReadFileTool(ws.GetWorkspacePath()))
 	tr.RegisterTool(tools.NewGrepSearchTool(ws.GetWorkspacePath()))
 	tr.RegisterTool(tools.NewRunTerminalTool(ws.GetWorkspacePath()))
+	tr.RegisterTool(tools.NewGitTool(ws.GetWorkspacePath()))
 
 	// Create style colors
 	userStyle := color.New(color.FgGreen).Add(color.Bold)
@@ -327,7 +336,7 @@ func (c *Copilot) StartAgentMode(goal string) error {
 	c.agent = &AgentState{
 		Goal:      goal,
 		StartTime: time.Now(),
-		Changes:   make([]string, 0),
+		Changes:   make([]Change, 0),
 	}
 	c.mu.Unlock()
 
@@ -382,8 +391,15 @@ func (c *Copilot) runAgentLoop() error {
 			fmt.Print(chunk)
 		}
 
-		// Ask user if they want to continue
-		c.cmdStyle.Print("\nContinue with the next step? (yes/no/rollback): ")
+		// Show changes if any were made
+		gitTool := tools.NewGitTool(c.workspace.GetWorkspacePath())
+		if diff, err := gitTool.Execute(c.ctx, map[string]interface{}{"operation": "diff"}); err == nil && diff != "" {
+			c.cmdStyle.Println("\nChanges made:")
+			fmt.Println(diff)
+		}
+
+		// Ask user for action
+		c.cmdStyle.Print("\nWhat would you like to do? [a]ccept/[r]eject/reject [A]ll/show [d]iff/[q]uit: ")
 		rl, err := readline.New("")
 		if err != nil {
 			return err
@@ -394,25 +410,39 @@ func (c *Copilot) runAgentLoop() error {
 		}
 
 		switch strings.ToLower(strings.TrimSpace(input)) {
-		case "yes", "y":
+		case "a", "accept":
+			// Commit changes
+			if _, err := gitTool.Execute(c.ctx, map[string]interface{}{
+				"operation": "commit",
+				"message":   fmt.Sprintf("Auto commit: %s", c.agent.CurrentTask),
+			}); err != nil {
+				c.cmdStyle.Printf("Failed to commit changes: %v\n", err)
+			}
 			continue
-		case "no", "n":
+		case "r", "reject":
+			// Reset current changes
+			if _, err := gitTool.Execute(c.ctx, map[string]interface{}{"operation": "reset"}); err != nil {
+				c.cmdStyle.Printf("Failed to reset changes: %v\n", err)
+			}
+			continue
+		case "d", "diff":
+			// Show detailed diff
+			if diff, err := gitTool.Execute(c.ctx, map[string]interface{}{"operation": "diff"}); err == nil {
+				fmt.Println("\nDetailed changes:")
+				fmt.Println(diff)
+			}
+			continue
+		case "A", "all":
+			// Reset all changes and exit
+			if _, err := gitTool.Execute(c.ctx, map[string]interface{}{"operation": "reset"}); err != nil {
+				c.cmdStyle.Printf("Failed to reset changes: %v\n", err)
+			}
 			return nil
-		case "rollback":
-			return c.rollbackChanges()
+		case "q", "quit":
+			return nil
 		default:
-			c.cmdStyle.Println("Invalid input. Continuing...")
+			c.cmdStyle.Println("Invalid input. Please try again.")
+			continue
 		}
 	}
-}
-
-// rollbackChanges rolls back the changes made by the agent
-func (c *Copilot) rollbackChanges() error {
-	c.cmdStyle.Println("Rolling back changes...")
-	// TODO: Implement rollback functionality
-	// This would involve:
-	// 1. Keeping track of file changes
-	// 2. Creating backup copies
-	// 3. Restoring from backups
-	return nil
 }
