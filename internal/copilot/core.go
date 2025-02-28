@@ -112,8 +112,6 @@ func New(cfg config.Config) *Copilot {
 
 	// Create tool registry and register tools
 	tr := tools.NewRegistry()
-	tr.RegisterTool(tools.NewEditFileTool(ws.GetWorkspacePath()))
-	tr.RegisterTool(tools.NewReadFileTool(ws.GetWorkspacePath()))
 	tr.RegisterTool(tools.NewGrepSearchTool(ws.GetWorkspacePath()))
 	tr.RegisterTool(tools.NewRunTerminalTool(ws.GetWorkspacePath()))
 	tr.RegisterTool(tools.NewGitTool(ws.GetWorkspacePath()))
@@ -428,29 +426,34 @@ func (c *Copilot) AddSystemMessage(message string) {
 
 // GetFileContext retrieves the content of a file
 func (c *Copilot) GetFileContext(filePath string) (string, error) {
-	tool := tools.NewReadFileTool(c.workspace.GetWorkspacePath())
-	return tool.Execute(c.ctx, map[string]interface{}{
-		"path": filePath,
-	})
+	if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
+		return fsTool.Execute(c.ctx, map[string]interface{}{
+			"operation": "read",
+			"path":      filePath,
+		})
+	}
+	return "", fmt.Errorf("filesystem tool not available")
 }
 
 // GetCodebaseContext retrieves information about the codebase structure
 func (c *Copilot) GetCodebaseContext(depth int) (string, error) {
-	// Use grep tool to search through the codebase
-	tool := tools.NewGrepSearchTool(c.workspace.GetWorkspacePath())
-	return tool.Execute(c.ctx, map[string]interface{}{
-		"pattern": ".",
-		"depth":   depth,
-	})
+	if grepTool := c.tools.GetTool("grep_search"); grepTool != nil {
+		return grepTool.Execute(c.ctx, map[string]interface{}{
+			"pattern": ".",
+			"depth":   depth,
+		})
+	}
+	return "", fmt.Errorf("grep_search tool not available")
 }
 
 // GetGitContext retrieves git-related information
 func (c *Copilot) GetGitContext(command string) (string, error) {
-	// Use terminal tool to run git commands
-	tool := tools.NewRunTerminalTool(c.workspace.GetWorkspacePath())
-	return tool.Execute(c.ctx, map[string]interface{}{
-		"command": fmt.Sprintf("git %s", command),
-	})
+	if gitTool := c.tools.GetTool("git"); gitTool != nil {
+		return gitTool.Execute(c.ctx, map[string]interface{}{
+			"operation": command,
+		})
+	}
+	return "", fmt.Errorf("git tool not available")
 }
 
 // SetProjectPath sets the project path for the workspace
@@ -461,8 +464,6 @@ func (c *Copilot) SetProjectPath(path string) error {
 
 	// Update tool workspace paths
 	workspacePath := c.workspace.GetWorkspacePath()
-	c.tools.RegisterTool(tools.NewEditFileTool(workspacePath))
-	c.tools.RegisterTool(tools.NewReadFileTool(workspacePath))
 	c.tools.RegisterTool(tools.NewGrepSearchTool(workspacePath))
 	c.tools.RegisterTool(tools.NewRunTerminalTool(workspacePath))
 	c.tools.RegisterTool(tools.NewGitTool(workspacePath))
@@ -695,18 +696,34 @@ func (c *Copilot) runAgentLoop() error {
 // backupChangedFiles creates backups of modified files
 func (c *Copilot) backupChangedFiles() error {
 	// Get list of modified files
-	gitTool := tools.NewRunTerminalTool(c.workspace.GetWorkspacePath())
+	gitTool := c.tools.GetTool("git")
+	if gitTool == nil {
+		return fmt.Errorf("git tool not available")
+	}
+
 	output, err := gitTool.Execute(c.ctx, map[string]interface{}{
-		"command": "git status --porcelain",
+		"operation": "status",
+		"format":    "porcelain",
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get modified files: %v", err)
 	}
 
-	// Create backup directory if it doesn't exist
+	fsTool := c.tools.GetTool("filesystem")
+	if fsTool == nil {
+		return fmt.Errorf("filesystem tool not available")
+	}
+
+	// Create backup directory
 	backupDir := filepath.Join(c.workspace.GetWorkspacePath(), ".tama", "backups",
 		time.Now().Format("20060102_150405"))
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
+
+	_, err = fsTool.Execute(c.ctx, map[string]interface{}{
+		"operation": "mkdir",
+		"path":      backupDir,
+		"recursive": true,
+	})
+	if err != nil {
 		return fmt.Errorf("failed to create backup directory: %v", err)
 	}
 
@@ -723,12 +740,17 @@ func (c *Copilot) backupChangedFiles() error {
 			continue
 		}
 
-		// Copy file to backup directory
 		srcPath := filepath.Join(c.workspace.GetWorkspacePath(), file)
 		dstPath := filepath.Join(backupDir, file)
 
 		// Create destination directory if needed
-		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+		dstDir := filepath.Dir(dstPath)
+		_, err := fsTool.Execute(c.ctx, map[string]interface{}{
+			"operation": "mkdir",
+			"path":      dstDir,
+			"recursive": true,
+		})
+		if err != nil {
 			return fmt.Errorf("failed to create backup subdirectory for %s: %v", file, err)
 		}
 
@@ -741,13 +763,30 @@ func (c *Copilot) backupChangedFiles() error {
 	return nil
 }
 
-// copyFile copies a file from src to dst
+// copyFile copies a file from src to dst using FileSystemTool
 func (c *Copilot) copyFile(src, dst string) error {
-	input, err := os.ReadFile(src)
-	if err != nil {
-		return err
+	if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
+		// Read source file
+		content, err := fsTool.Execute(c.ctx, map[string]interface{}{
+			"operation": "read",
+			"path":      src,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to read source file: %v", err)
+		}
+
+		// Write to destination file
+		_, err = fsTool.Execute(c.ctx, map[string]interface{}{
+			"operation": "write",
+			"path":      dst,
+			"content":   content,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to write destination file: %v", err)
+		}
+		return nil
 	}
-	return os.WriteFile(dst, input, 0644)
+	return fmt.Errorf("filesystem tool not available")
 }
 
 // showTaskSummary displays a summary of the current task and changes
@@ -952,9 +991,15 @@ func (c *Copilot) handleAnalysisPhase(decision *Decision, respChan chan<- string
 		decision.Reasoning, decision.Action)
 
 	// Gather required context
-	for _, contextPath := range decision.Context {
-		if content, err := c.workspace.ReadFile(contextPath); err == nil {
-			respChan <- fmt.Sprintf("\nRelevant context from %s:\n%s\n", contextPath, content)
+	if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
+		for _, contextPath := range decision.Context {
+			content, err := fsTool.Execute(c.ctx, map[string]interface{}{
+				"operation": "read",
+				"path":      contextPath,
+			})
+			if err == nil {
+				respChan <- fmt.Sprintf("\nRelevant context from %s:\n%s\n", contextPath, content)
+			}
 		}
 	}
 	return nil
@@ -964,18 +1009,18 @@ func (c *Copilot) handleAnalysisPhase(decision *Decision, respChan chan<- string
 func (c *Copilot) handleContextPhase(decision *Decision, respChan chan<- string) error {
 	respChan <- "Gathering context...\n"
 
-	// Use workspace tools to gather context
-	for _, toolName := range decision.Tools {
-		if t := c.tools.GetTool(toolName); t != nil {
-			result, err := t.Execute(c.ctx, map[string]interface{}{
-				"operation": "read",
+	// Use grep tool to search through the codebase
+	if grepTool := c.tools.GetTool("grep_search"); grepTool != nil {
+		for _, pattern := range decision.Tools {
+			result, err := grepTool.Execute(c.ctx, map[string]interface{}{
+				"pattern": pattern,
 			})
 			if err != nil {
-				respChan <- fmt.Sprintf("\nError from %s: %v\n", toolName, err)
+				respChan <- fmt.Sprintf("\nError searching for pattern %s: %v\n", pattern, err)
 				continue
 			}
 			if result != "" {
-				respChan <- fmt.Sprintf("\nContext from %s:\n%s\n", toolName, result)
+				respChan <- fmt.Sprintf("\nFound matches for pattern %s:\n%s\n", pattern, result)
 			}
 		}
 	}
@@ -988,26 +1033,10 @@ func (c *Copilot) handleModificationPhase(decision *Decision, respChan chan<- st
 
 	// Track all changes for potential rollback
 	var appliedChanges []Change
-	var backups []string
 
 	// Create a rollback function
 	rollback := func() {
 		respChan <- "\nRolling back changes...\n"
-		for i, change := range appliedChanges {
-			backup := backups[i]
-			if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
-				if _, err := fsTool.Execute(c.ctx, map[string]interface{}{
-					"operation":   "restore",
-					"path":        change.FilePath,
-					"backup_path": backup,
-				}); err != nil {
-					respChan <- fmt.Sprintf("Warning: Failed to restore %s: %v\n", change.FilePath, err)
-				} else {
-					respChan <- fmt.Sprintf("Restored %s from backup\n", change.FilePath)
-				}
-			}
-		}
-		// Reset git changes
 		if gitTool := c.tools.GetTool("git"); gitTool != nil {
 			if _, err := gitTool.Execute(c.ctx, map[string]interface{}{
 				"operation": "reset",
@@ -1019,34 +1048,34 @@ func (c *Copilot) handleModificationPhase(decision *Decision, respChan chan<- st
 	}
 
 	// Apply each proposed change
+	fsTool := c.tools.GetTool("filesystem")
+	if fsTool == nil {
+		return fmt.Errorf("filesystem tool not available")
+	}
+
 	for _, change := range decision.Changes {
 		respChan <- fmt.Sprintf("\nProcessing change for %s:\n%s\n", change.FilePath, change.Description)
 
 		// Create backup
-		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
-			result, err := fsTool.Execute(c.ctx, map[string]interface{}{
-				"operation": "backup",
-				"path":      change.FilePath,
-			})
-			if err != nil {
-				respChan <- fmt.Sprintf("Error: Failed to create backup: %v\n", err)
-				rollback()
-				return fmt.Errorf("backup creation failed: %v", err)
-			}
-			backups = append(backups, result)
-			respChan <- fmt.Sprintf("Created backup at: %s\n", result)
+		_, err := fsTool.Execute(c.ctx, map[string]interface{}{
+			"operation": "backup",
+			"path":      change.FilePath,
+		})
+		if err != nil {
+			respChan <- fmt.Sprintf("Warning: Failed to create backup: %v\n", err)
+			rollback()
+			return fmt.Errorf("backup creation failed: %v", err)
 		}
 
 		// Get current file content
-		var currentContent string
-		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
-			content, err := fsTool.Execute(c.ctx, map[string]interface{}{
-				"operation": "read",
-				"path":      change.FilePath,
-			})
-			if err == nil {
-				currentContent = content
-			}
+		content, err := fsTool.Execute(c.ctx, map[string]interface{}{
+			"operation": "read",
+			"path":      change.FilePath,
+		})
+		if err != nil {
+			respChan <- fmt.Sprintf("Error: Failed to read file: %v\n", err)
+			rollback()
+			return fmt.Errorf("file read failed: %v", err)
 		}
 
 		// Generate modified content
@@ -1062,7 +1091,7 @@ Provide the complete modified content that can be written to the file. Ensure:
 2. The code follows best practices and conventions
 3. The changes are properly documented
 4. The code is properly formatted
-`, currentContent, change.Description)
+`, content, change.Description)
 
 		var modifiedContent strings.Builder
 		callback := func(chunk string) {
@@ -1076,68 +1105,30 @@ Provide the complete modified content that can be written to the file. Ensure:
 		}
 
 		// Write modified content
-		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
-			if _, err := fsTool.Execute(c.ctx, map[string]interface{}{
-				"operation": "write",
+		_, err = fsTool.Execute(c.ctx, map[string]interface{}{
+			"operation": "write",
+			"path":      change.FilePath,
+			"content":   modifiedContent.String(),
+		})
+		if err != nil {
+			respChan <- fmt.Sprintf("Error: Failed to write file: %v\n", err)
+			rollback()
+			return fmt.Errorf("file write failed: %v", err)
+		}
+		respChan <- "Successfully wrote changes to file\n"
+
+		// Run linter check
+		if lintTool := c.tools.GetTool("linter"); lintTool != nil {
+			checkResult, err := lintTool.Execute(c.ctx, map[string]interface{}{
+				"operation": "check",
 				"path":      change.FilePath,
-				"content":   modifiedContent.String(),
-			}); err != nil {
-				respChan <- fmt.Sprintf("Error: Failed to write file: %v\n", err)
-				rollback()
-				return fmt.Errorf("file write failed: %v", err)
-			}
-			respChan <- "Successfully wrote changes to file\n"
-
-			// Run linter check
-			if lintTool := c.tools.GetTool("linter"); lintTool != nil {
-				checkResult, err := lintTool.Execute(c.ctx, map[string]interface{}{
-					"operation": "check",
-					"path":      change.FilePath,
-				})
-				if err != nil {
-					respChan <- fmt.Sprintf("Warning: Linter check failed: %v\n", err)
-				} else if checkResult != "No issues found" {
-					respChan <- fmt.Sprintf("Linter found issues:\n%s\n", checkResult)
-
-					// Try to fix linter issues
-					fixResult, err := lintTool.Execute(c.ctx, map[string]interface{}{
-						"operation": "fix",
-						"path":      change.FilePath,
-					})
-					if err != nil {
-						respChan <- fmt.Sprintf("Warning: Failed to fix linter issues: %v\n", err)
-					} else {
-						respChan <- fmt.Sprintf("Auto-fixed linter issues: %s\n", fixResult)
-
-						// Verify fixes
-						verifyResult, err := lintTool.Execute(c.ctx, map[string]interface{}{
-							"operation": "check",
-							"path":      change.FilePath,
-						})
-						if err != nil {
-							respChan <- fmt.Sprintf("Warning: Failed to verify fixes: %v\n", err)
-						} else if verifyResult != "No issues found" {
-							respChan <- "Warning: Some linter issues remain after auto-fix\n"
-							rollback()
-							return fmt.Errorf("linter issues remain after fix")
-						}
-					}
-				} else {
-					respChan <- "Code passed linter checks\n"
-				}
-			}
-
-			// Format Go files
-			if strings.HasSuffix(change.FilePath, ".go") {
-				if runTool := c.tools.GetTool("run_terminal"); runTool != nil {
-					if _, err := runTool.Execute(c.ctx, map[string]interface{}{
-						"command": fmt.Sprintf("go fmt %s", change.FilePath),
-					}); err != nil {
-						respChan <- fmt.Sprintf("Warning: Failed to format file: %v\n", err)
-					} else {
-						respChan <- "Formatted Go code\n"
-					}
-				}
+			})
+			if err != nil {
+				respChan <- fmt.Sprintf("Warning: Linter check failed: %v\n", err)
+			} else if checkResult != "No issues found" {
+				respChan <- fmt.Sprintf("Linter found issues:\n%s\n", checkResult)
+			} else {
+				respChan <- "Code passed linter checks\n"
 			}
 		}
 
@@ -1286,10 +1277,10 @@ func (c *Copilot) AutoFixCode(ctx context.Context, respChan chan<- string) error
 	// Step 2: Find all source files
 	respChan <- "\nStep 2: Scanning for source files...\n"
 	var sourceFiles []string
-	if grepTool := c.tools.GetTool("grep_search"); grepTool != nil {
-		result, err := grepTool.Execute(ctx, map[string]interface{}{
-			"pattern": ".",
-			"depth":   3,
+	if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
+		result, err := fsTool.Execute(ctx, map[string]interface{}{
+			"operation": "list",
+			"recursive": true,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to scan files: %v", err)
@@ -1316,41 +1307,44 @@ func (c *Copilot) AutoFixCode(ctx context.Context, respChan chan<- string) error
 	}
 	var filesWithIssues []FileIssue
 
+	fsTool := c.tools.GetTool("filesystem")
+	if fsTool == nil {
+		return fmt.Errorf("filesystem tool not available")
+	}
+
 	for _, file := range sourceFiles {
 		respChan <- fmt.Sprintf("\nChecking %s...\n", file)
 
 		// Read file content
-		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
-			content, err := fsTool.Execute(ctx, map[string]interface{}{
-				"operation": "read",
+		content, err := fsTool.Execute(ctx, map[string]interface{}{
+			"operation": "read",
+			"path":      file,
+		})
+		if err != nil {
+			respChan <- fmt.Sprintf("Warning: Failed to read file: %v\n", err)
+			continue
+		}
+
+		// Run linter check
+		if lintTool := c.tools.GetTool("linter"); lintTool != nil {
+			issues, err := lintTool.Execute(ctx, map[string]interface{}{
+				"operation": "check",
 				"path":      file,
 			})
 			if err != nil {
-				respChan <- fmt.Sprintf("Warning: Failed to read file: %v\n", err)
+				respChan <- fmt.Sprintf("Warning: Failed to check file: %v\n", err)
 				continue
 			}
 
-			// Run linter check
-			if lintTool := c.tools.GetTool("linter"); lintTool != nil {
-				issues, err := lintTool.Execute(ctx, map[string]interface{}{
-					"operation": "check",
-					"path":      file,
+			if issues != "No issues found" {
+				filesWithIssues = append(filesWithIssues, FileIssue{
+					Path:    file,
+					Content: content,
+					Issues:  issues,
 				})
-				if err != nil {
-					respChan <- fmt.Sprintf("Warning: Failed to check file: %v\n", err)
-					continue
-				}
-
-				if issues != "No issues found" {
-					filesWithIssues = append(filesWithIssues, FileIssue{
-						Path:    file,
-						Content: content,
-						Issues:  issues,
-					})
-					respChan <- fmt.Sprintf("Found issues:\n%s\n", issues)
-				} else {
-					respChan <- "No issues found\n"
-				}
+				respChan <- fmt.Sprintf("Found issues:\n%s\n", issues)
+			} else {
+				respChan <- "No issues found\n"
 			}
 		}
 	}
@@ -1362,17 +1356,15 @@ func (c *Copilot) AutoFixCode(ctx context.Context, respChan chan<- string) error
 			respChan <- fmt.Sprintf("\nFixing %s...\n", file.Path)
 
 			// Create backup
-			if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
-				result, err := fsTool.Execute(ctx, map[string]interface{}{
-					"operation": "backup",
-					"path":      file.Path,
-				})
-				if err != nil {
-					respChan <- fmt.Sprintf("Warning: Failed to create backup: %v\n", err)
-				} else {
-					respChan <- fmt.Sprintf("Created backup at: %s\n", result)
-				}
+			_, err := fsTool.Execute(ctx, map[string]interface{}{
+				"operation": "backup",
+				"path":      file.Path,
+			})
+			if err != nil {
+				respChan <- fmt.Sprintf("Warning: Failed to create backup: %v\n", err)
+				continue
 			}
+			respChan <- "Created backup successfully\n"
 
 			// Generate fix using LLM
 			fixPrompt := fmt.Sprintf(`Analyze the following code and its issues, then provide a fixed version:
@@ -1393,50 +1385,48 @@ Please provide the complete fixed code that resolves these issues:
 				fixedContent.WriteString(chunk)
 			}
 
-			_, err := c.llm.SendMessageWithCallback(fixPrompt, callback)
+			_, err = c.llm.SendMessageWithCallback(fixPrompt, callback)
 			if err != nil {
 				respChan <- fmt.Sprintf("Error generating fix: %v\n", err)
 				continue
 			}
 
 			// Apply the fix
-			if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
-				_, err := fsTool.Execute(ctx, map[string]interface{}{
-					"operation": "write",
+			_, err = fsTool.Execute(ctx, map[string]interface{}{
+				"operation": "write",
+				"path":      file.Path,
+				"content":   fixedContent.String(),
+			})
+			if err != nil {
+				respChan <- fmt.Sprintf("Error applying fix: %v\n", err)
+				continue
+			}
+
+			// Run linter again to verify fix
+			if lintTool := c.tools.GetTool("linter"); lintTool != nil {
+				verifyResult, err := lintTool.Execute(ctx, map[string]interface{}{
+					"operation": "check",
 					"path":      file.Path,
-					"content":   fixedContent.String(),
 				})
 				if err != nil {
-					respChan <- fmt.Sprintf("Error applying fix: %v\n", err)
-					continue
+					respChan <- fmt.Sprintf("Warning: Failed to verify fix: %v\n", err)
+				} else if verifyResult == "No issues found" {
+					respChan <- "Fix successful - no issues remaining\n"
+				} else {
+					respChan <- fmt.Sprintf("Some issues remain:\n%s\n", verifyResult)
 				}
+			}
 
-				// Run linter again to verify fix
-				if lintTool := c.tools.GetTool("linter"); lintTool != nil {
-					verifyResult, err := lintTool.Execute(ctx, map[string]interface{}{
-						"operation": "check",
-						"path":      file.Path,
+			// Format Go files
+			if strings.HasSuffix(file.Path, ".go") {
+				if runTool := c.tools.GetTool("run_terminal"); runTool != nil {
+					_, err := runTool.Execute(ctx, map[string]interface{}{
+						"command": fmt.Sprintf("go fmt %s", file.Path),
 					})
 					if err != nil {
-						respChan <- fmt.Sprintf("Warning: Failed to verify fix: %v\n", err)
-					} else if verifyResult == "No issues found" {
-						respChan <- "Fix successful - no issues remaining\n"
+						respChan <- fmt.Sprintf("Warning: Failed to format file: %v\n", err)
 					} else {
-						respChan <- fmt.Sprintf("Some issues remain:\n%s\n", verifyResult)
-					}
-				}
-
-				// Format code if it's a Go file
-				if strings.HasSuffix(file.Path, ".go") {
-					if runTool := c.tools.GetTool("run_terminal"); runTool != nil {
-						_, err := runTool.Execute(ctx, map[string]interface{}{
-							"command": fmt.Sprintf("go fmt %s", file.Path),
-						})
-						if err != nil {
-							respChan <- fmt.Sprintf("Warning: Failed to format file: %v\n", err)
-						} else {
-							respChan <- "Formatted Go code\n"
-						}
+						respChan <- "Formatted Go code\n"
 					}
 				}
 			}
