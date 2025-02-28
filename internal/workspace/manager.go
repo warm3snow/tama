@@ -57,6 +57,11 @@ func (m *Manager) ReadFile(path string) (*File, error) {
 
 	absPath := filepath.Join(m.root, path)
 
+	// Check if path is within workspace
+	if !filepath.HasPrefix(absPath, m.root) {
+		return nil, fmt.Errorf("path is outside workspace: %s", path)
+	}
+
 	// Check if file is already open
 	if file, ok := m.openFiles[path]; ok {
 		// Check if file has been modified
@@ -65,7 +70,13 @@ func (m *Manager) ReadFile(path string) (*File, error) {
 				// File has been modified, reload it
 				content, err := os.ReadFile(absPath)
 				if err != nil {
-					return nil, err
+					if os.IsNotExist(err) {
+						return nil, fmt.Errorf("file does not exist: %s", path)
+					}
+					if os.IsPermission(err) {
+						return nil, fmt.Errorf("permission denied: %s", path)
+					}
+					return nil, fmt.Errorf("failed to read file: %v", err)
 				}
 				file.Content = content
 				file.ModTime = stat.ModTime().Unix()
@@ -77,12 +88,18 @@ func (m *Manager) ReadFile(path string) (*File, error) {
 	// Read new file
 	content, err := os.ReadFile(absPath)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("file does not exist: %s", path)
+		}
+		if os.IsPermission(err) {
+			return nil, fmt.Errorf("permission denied: %s", path)
+		}
+		return nil, fmt.Errorf("failed to read file: %v", err)
 	}
 
 	stat, err := os.Stat(absPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get file info: %v", err)
 	}
 
 	file := &File{
@@ -102,17 +119,30 @@ func (m *Manager) WriteFile(path string, content []byte) error {
 
 	absPath := filepath.Join(m.root, path)
 
-	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
-		return err
+	// Check if path is within workspace
+	if !filepath.HasPrefix(absPath, m.root) {
+		return fmt.Errorf("path is outside workspace: %s", path)
 	}
 
+	// Create parent directories if they don't exist
+	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
+		if os.IsPermission(err) {
+			return fmt.Errorf("permission denied creating directories: %s", filepath.Dir(path))
+		}
+		return fmt.Errorf("failed to create directories: %v", err)
+	}
+
+	// Write file
 	if err := os.WriteFile(absPath, content, 0644); err != nil {
-		return err
+		if os.IsPermission(err) {
+			return fmt.Errorf("permission denied writing file: %s", path)
+		}
+		return fmt.Errorf("failed to write file: %v", err)
 	}
 
 	stat, err := os.Stat(absPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get file info: %v", err)
 	}
 
 	m.openFiles[path] = &File{
@@ -140,14 +170,33 @@ func (m *Manager) GetWorkspacePath() string {
 
 // SetWorkspacePath sets the workspace root path
 func (m *Manager) SetWorkspacePath(path string) error {
-	// Check if path exists and is a directory
-	info, err := os.Stat(path)
+	// Convert to absolute path
+	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get absolute path: %v", err)
+	}
+
+	// Check if path exists and is a directory
+	info, err := os.Stat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("directory does not exist: %s", absPath)
+		}
+		if os.IsPermission(err) {
+			return fmt.Errorf("permission denied: %s", absPath)
+		}
+		return fmt.Errorf("failed to access directory: %v", err)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("path is not a directory: %s", path)
+		return fmt.Errorf("path is not a directory: %s", absPath)
 	}
+
+	// Check if directory is readable
+	f, err := os.Open(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to open directory: %v", err)
+	}
+	f.Close()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -156,6 +205,6 @@ func (m *Manager) SetWorkspacePath(path string) error {
 	m.openFiles = make(map[string]*File)
 
 	// Set new root path
-	m.root = path
+	m.root = absPath
 	return nil
 }

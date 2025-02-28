@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -106,6 +107,9 @@ func New(cfg config.Config) *Copilot {
 	// Create workspace manager
 	ws := workspace.NewManager()
 
+	// Create machine context
+	machineCtx := machine.NewContext()
+
 	// Create tool registry and register tools
 	tr := tools.NewRegistry()
 	tr.RegisterTool(tools.NewEditFileTool(ws.GetWorkspacePath()))
@@ -114,16 +118,19 @@ func New(cfg config.Config) *Copilot {
 	tr.RegisterTool(tools.NewRunTerminalTool(ws.GetWorkspacePath()))
 	tr.RegisterTool(tools.NewGitTool(ws.GetWorkspacePath()))
 	tr.RegisterTool(tools.NewFileSystemTool(ws.GetWorkspacePath()))
+	tr.RegisterTool(tools.NewLanguageDetector(ws.GetWorkspacePath()))
+	tr.RegisterTool(tools.NewLinterTool(ws.GetWorkspacePath()))
 
 	// Create style colors
 	userStyle := color.New(color.FgGreen).Add(color.Bold)
 	aiStyle := color.New(color.FgBlue)
 	cmdStyle := color.New(color.FgYellow).Add(color.Bold)
 
-	return &Copilot{
+	// Create copilot instance
+	cop := &Copilot{
 		ctx:       ctx,
 		cancel:    cancel,
-		machine:   machine.NewContext(),
+		machine:   machineCtx,
 		llm:       llm.NewClient(cfg),
 		tools:     tr,
 		workspace: ws,
@@ -131,6 +138,8 @@ func New(cfg config.Config) *Copilot {
 		aiStyle:   aiStyle,
 		cmdStyle:  cmdStyle,
 	}
+
+	return cop
 }
 
 // StartInteractiveChat starts an interactive chat session
@@ -251,13 +260,22 @@ func (c *Copilot) ProcessPrompt(prompt string) (<-chan string, error) {
 	// Create response channel
 	respChan := make(chan string)
 
-	// Get workspace context
-	wsContext := c.workspace.GetSummary()
+	// Check if this is an auto-fix request
+	if isAutoFixRequest(prompt) {
+		go func() {
+			defer close(respChan)
+			if err := c.AutoFixCode(c.ctx, respChan); err != nil {
+				respChan <- fmt.Sprintf("\nError during auto-fix: %v\n", err)
+			}
+		}()
+		return respChan, nil
+	}
 
-	// Get available tools descriptions
+	// Get workspace context and tool descriptions
+	wsContext := c.workspace.GetSummary()
 	toolDescs := c.tools.GetToolDescriptions()
 
-	// Create system message with enhanced decision making
+	// Create system message
 	systemMsg := fmt.Sprintf(`You are a powerful AI coding assistant. You will process requests in distinct phases:
 
 1. Analysis Phase:
@@ -295,76 +313,88 @@ Current workspace: %s
 	go func() {
 		defer close(respChan)
 
-		// First, get the initial decision
+		// Get initial decision
 		decision, err := c.getInitialDecision(prompt)
 		if err != nil {
 			respChan <- fmt.Sprintf("Error analyzing prompt: %v", err)
 			return
 		}
 
-		// Process based on the decision
-		switch decision.Phase {
-		case PhaseAnalysis:
-			c.handleAnalysisPhase(decision, respChan)
-		case PhaseContext:
-			c.handleContextPhase(decision, respChan)
-		case PhaseModification:
-			c.handleModificationPhase(decision, respChan)
-		case PhaseVerification:
-			c.handleVerificationPhase(decision, respChan)
+		// Process each phase sequentially
+		phases := []struct {
+			phase   DecisionPhase
+			handler func(*Decision, chan<- string) error
+			message string
+		}{
+			{PhaseAnalysis, c.handleAnalysisPhase, "Starting analysis phase..."},
+			{PhaseContext, c.handleContextPhase, "Gathering context..."},
+			{PhaseModification, c.handleModificationPhase, "Making modifications..."},
+			{PhaseVerification, c.handleVerificationPhase, "Verifying changes..."},
 		}
 
-		// Create callback for streaming responses
-		callback := func(chunk string) {
-			// Check if it's a tool call
-			if toolCall := c.tools.ParseToolCall(chunk); toolCall != nil {
-				// Execute tool and get result
-				result := toolCall.Execute(c.ctx)
+		currentPhase := decision.Phase
+		phaseIndex := -1
 
-				// Handle specific tool responses
-				toolName := ""
-				if strings.Contains(chunk, `"tool":"edit_file"`) {
-					toolName = "edit_file"
-				} else if strings.Contains(chunk, `"tool":"run_terminal"`) {
-					toolName = "run_terminal"
-				}
-
-				switch toolName {
-				case "edit_file":
-					respChan <- fmt.Sprintf("\nApplied changes to file: %s\n", result)
-					// Show git diff after edit
-					if gitTool := c.tools.GetTool("git"); gitTool != nil {
-						if diff, err := gitTool.Execute(c.ctx, map[string]interface{}{
-							"operation": "diff",
-						}); err == nil && diff != "" {
-							respChan <- fmt.Sprintf("\nChanges made:\n%s\n", diff)
-						}
-					}
-				case "run_terminal":
-					respChan <- fmt.Sprintf("\nCommand output:\n%s\n", result)
-				default:
-					respChan <- fmt.Sprintf("\nTool result: %s\n", result)
-				}
-				return
-			}
-
-			// Stream regular response to user
-			select {
-			case <-c.ctx.Done():
-				return
-			case respChan <- chunk:
+		// Find the starting phase
+		for i, p := range phases {
+			if p.phase == currentPhase {
+				phaseIndex = i
+				break
 			}
 		}
 
-		// Send message with streaming
-		response, err := c.llm.SendMessageWithCallback(prompt, callback)
-		if err != nil {
-			respChan <- "Error: " + err.Error()
+		if phaseIndex == -1 {
+			respChan <- fmt.Sprintf("Error: Invalid phase '%s'", currentPhase)
 			return
 		}
 
-		// Update conversation with final response
-		c.llm.UpdateConversation(prompt, response)
+		// Execute phases sequentially
+		for i := phaseIndex; i < len(phases); i++ {
+			phase := phases[i]
+			respChan <- fmt.Sprintf("\n=== %s ===\n", phase.message)
+
+			if err := phase.handler(decision, respChan); err != nil {
+				respChan <- fmt.Sprintf("\nError in %s phase: %v\n", phase.phase, err)
+				return
+			}
+
+			// Create callback for handling tool calls
+			callback := func(chunk string) {
+				// Check if it's a tool call
+				if toolCall := c.tools.ParseToolCall(chunk); toolCall != nil {
+					result := toolCall.Execute(c.ctx)
+					respChan <- fmt.Sprintf("\nTool result: %s\n", result)
+				} else {
+					// Stream regular response
+					select {
+					case <-c.ctx.Done():
+						return
+					case respChan <- chunk:
+					}
+				}
+			}
+
+			// Get LLM's response for the current phase
+			response, err := c.llm.SendMessageWithCallback(
+				fmt.Sprintf("Continue with %s phase. Current state: %s",
+					phase.phase, decision.Action),
+				callback,
+			)
+			if err != nil {
+				respChan <- fmt.Sprintf("\nError getting LLM response: %v\n", err)
+				return
+			}
+
+			// Update conversation
+			c.llm.UpdateConversation(prompt, response)
+
+			// Ask for confirmation before proceeding to next phase
+			if i < len(phases)-1 {
+				respChan <- fmt.Sprintf("\nProceed to %s phase? (yes/no): ", phases[i+1].phase)
+				// Note: In a real implementation, we would need to handle user input here
+				// For now, we'll automatically proceed
+			}
+		}
 	}()
 
 	return respChan, nil
@@ -425,7 +455,45 @@ func (c *Copilot) GetGitContext(command string) (string, error) {
 
 // SetProjectPath sets the project path for the workspace
 func (c *Copilot) SetProjectPath(path string) error {
-	return c.workspace.SetWorkspacePath(path)
+	if err := c.workspace.SetWorkspacePath(path); err != nil {
+		return err
+	}
+
+	// Update tool workspace paths
+	workspacePath := c.workspace.GetWorkspacePath()
+	c.tools.RegisterTool(tools.NewEditFileTool(workspacePath))
+	c.tools.RegisterTool(tools.NewReadFileTool(workspacePath))
+	c.tools.RegisterTool(tools.NewGrepSearchTool(workspacePath))
+	c.tools.RegisterTool(tools.NewRunTerminalTool(workspacePath))
+	c.tools.RegisterTool(tools.NewGitTool(workspacePath))
+	c.tools.RegisterTool(tools.NewFileSystemTool(workspacePath))
+	c.tools.RegisterTool(tools.NewLanguageDetector(workspacePath))
+	c.tools.RegisterTool(tools.NewLinterTool(workspacePath))
+
+	// Detect languages in workspace
+	if langTool := c.tools.GetTool("language_detector"); langTool != nil {
+		if result, err := langTool.Execute(c.ctx, nil); err == nil {
+			// Parse language detection results and update machine context
+			lines := strings.Split(result, "\n")
+			languages := make(map[string]float64)
+			for _, line := range lines {
+				if strings.HasPrefix(line, "- ") {
+					parts := strings.Split(line[2:], ":")
+					if len(parts) == 2 {
+						langName := strings.TrimSpace(parts[0])
+						percentStr := strings.TrimSpace(strings.Split(parts[1], "(")[1])
+						percentStr = strings.TrimSuffix(percentStr, "%)")
+						if percent, err := strconv.ParseFloat(percentStr, 64); err == nil {
+							languages[langName] = percent
+						}
+					}
+				}
+			}
+			c.machine.UpdateLanguages(languages)
+		}
+	}
+
+	return nil
 }
 
 // StartAgentMode starts the AI agent mode with a specific goal
@@ -732,10 +800,13 @@ func (c *Copilot) showProgress() {
 // getInitialDecision analyzes the prompt and returns the initial decision
 func (c *Copilot) getInitialDecision(prompt string) (*Decision, error) {
 	// Create analysis prompt
-	analysisPrompt := fmt.Sprintf(`Analyze the following request and determine the best approach:
+	analysisPrompt := fmt.Sprintf(`You are an AI assistant analyzing a user request to determine the next action.
+Please analyze the following request and determine the best approach:
+
 Request: %s
 
-You must respond in the following format exactly:
+You MUST respond in the following format EXACTLY, including all fields:
+
 Phase: [analysis/context/modification/verification]
 Action: [specific action to take]
 Reasoning: [why this approach]
@@ -743,13 +814,9 @@ Context: [comma-separated list of files/directories needed]
 Tools: [comma-separated list of tools needed]
 Changes: [list of file changes in the format: filepath|description]
 
-Example response:
-Phase: modification
-Action: Add error handling to the main function
-Reasoning: The code needs better error handling
-Context: cmd/main.go, internal/errors/errors.go
-Tools: filesystem,git
-Changes: cmd/main.go|Add try-catch block around main logic
+If this is a follow-up request, treat it as a new analysis phase.
+Do not reference previous responses or assume any context from previous interactions.
+Always provide ALL fields in your response, even if some are empty (use empty string or N/A).
 `, prompt)
 
 	// Get LLM response
@@ -765,11 +832,17 @@ Changes: cmd/main.go|Add try-catch block around main logic
 	}
 
 	// Parse response into Decision struct
-	decision := &Decision{}
+	decision := &Decision{
+		Phase:   PhaseAnalysis, // Default to analysis phase
+		Context: make([]string, 0),
+		Tools:   make([]string, 0),
+		Changes: make([]Change, 0),
+	}
 
 	// Split response into lines
 	lines := strings.Split(response.String(), "\n")
 	for _, line := range lines {
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
@@ -784,33 +857,31 @@ Changes: cmd/main.go|Add try-catch block around main logic
 
 		switch key {
 		case "Phase":
-			decision.Phase = DecisionPhase(value)
+			if phase := DecisionPhase(value); isValidPhase(phase) {
+				decision.Phase = phase
+			}
 		case "Action":
-			decision.Action = value
+			if value != "" && value != "N/A" {
+				decision.Action = value
+			}
 		case "Reasoning":
-			decision.Reasoning = value
+			if value != "" && value != "N/A" {
+				decision.Reasoning = value
+			}
 		case "Context":
-			if value != "" {
-				decision.Context = strings.Split(value, ",")
-				// Trim spaces
-				for i := range decision.Context {
-					decision.Context[i] = strings.TrimSpace(decision.Context[i])
-				}
+			if value != "" && value != "N/A" {
+				decision.Context = splitAndTrim(value, ",")
 			}
 		case "Tools":
-			if value != "" {
-				decision.Tools = strings.Split(value, ",")
-				// Trim spaces
-				for i := range decision.Tools {
-					decision.Tools[i] = strings.TrimSpace(decision.Tools[i])
-				}
+			if value != "" && value != "N/A" {
+				decision.Tools = splitAndTrim(value, ",")
 			}
 		case "Changes":
-			if value != "" {
+			if value != "" && value != "N/A" {
 				// Split multiple changes
 				changesList := strings.Split(value, "\n")
 				for _, change := range changesList {
-					if change == "" {
+					if change == "" || change == "N/A" {
 						continue
 					}
 					// Split filepath and description
@@ -827,11 +898,56 @@ Changes: cmd/main.go|Add try-catch block around main logic
 		}
 	}
 
+	// Validate decision
+	if err := validateDecision(decision); err != nil {
+		return nil, fmt.Errorf("invalid decision: %v", err)
+	}
+
 	return decision, nil
 }
 
+// isValidPhase checks if the given phase is valid
+func isValidPhase(phase DecisionPhase) bool {
+	switch phase {
+	case PhaseAnalysis, PhaseContext, PhaseModification, PhaseVerification:
+		return true
+	default:
+		return false
+	}
+}
+
+// splitAndTrim splits a string by delimiter and trims each part
+func splitAndTrim(s string, delimiter string) []string {
+	if s == "" {
+		return []string{}
+	}
+	parts := strings.Split(s, delimiter)
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" && trimmed != "N/A" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+// validateDecision ensures the decision has all required fields
+func validateDecision(d *Decision) error {
+	if d.Phase == "" {
+		return fmt.Errorf("phase is required")
+	}
+	if d.Action == "" {
+		return fmt.Errorf("action is required")
+	}
+	if d.Reasoning == "" {
+		return fmt.Errorf("reasoning is required")
+	}
+	return nil
+}
+
 // handleAnalysisPhase processes the analysis phase
-func (c *Copilot) handleAnalysisPhase(decision *Decision, respChan chan<- string) {
+func (c *Copilot) handleAnalysisPhase(decision *Decision, respChan chan<- string) error {
 	respChan <- fmt.Sprintf("Analysis:\n%s\n\nProposed action:\n%s\n",
 		decision.Reasoning, decision.Action)
 
@@ -841,10 +957,11 @@ func (c *Copilot) handleAnalysisPhase(decision *Decision, respChan chan<- string
 			respChan <- fmt.Sprintf("\nRelevant context from %s:\n%s\n", contextPath, content)
 		}
 	}
+	return nil
 }
 
 // handleContextPhase processes the context gathering phase
-func (c *Copilot) handleContextPhase(decision *Decision, respChan chan<- string) {
+func (c *Copilot) handleContextPhase(decision *Decision, respChan chan<- string) error {
 	respChan <- "Gathering context...\n"
 
 	// Use workspace tools to gather context
@@ -862,31 +979,65 @@ func (c *Copilot) handleContextPhase(decision *Decision, respChan chan<- string)
 			}
 		}
 	}
+	return nil
 }
 
 // handleModificationPhase processes the modification phase
-func (c *Copilot) handleModificationPhase(decision *Decision, respChan chan<- string) {
+func (c *Copilot) handleModificationPhase(decision *Decision, respChan chan<- string) error {
 	respChan <- "Implementing changes...\n"
+
+	// Track all changes for potential rollback
+	var appliedChanges []Change
+	var backups []string
+
+	// Create a rollback function
+	rollback := func() {
+		respChan <- "\nRolling back changes...\n"
+		for i, change := range appliedChanges {
+			backup := backups[i]
+			if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
+				if _, err := fsTool.Execute(c.ctx, map[string]interface{}{
+					"operation":   "restore",
+					"path":        change.FilePath,
+					"backup_path": backup,
+				}); err != nil {
+					respChan <- fmt.Sprintf("Warning: Failed to restore %s: %v\n", change.FilePath, err)
+				} else {
+					respChan <- fmt.Sprintf("Restored %s from backup\n", change.FilePath)
+				}
+			}
+		}
+		// Reset git changes
+		if gitTool := c.tools.GetTool("git"); gitTool != nil {
+			if _, err := gitTool.Execute(c.ctx, map[string]interface{}{
+				"operation": "reset",
+				"hard":      true,
+			}); err != nil {
+				respChan <- fmt.Sprintf("Warning: Failed to reset git changes: %v\n", err)
+			}
+		}
+	}
 
 	// Apply each proposed change
 	for _, change := range decision.Changes {
 		respChan <- fmt.Sprintf("\nProcessing change for %s:\n%s\n", change.FilePath, change.Description)
 
-		// Create backup using filesystem tool
+		// Create backup
 		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
 			result, err := fsTool.Execute(c.ctx, map[string]interface{}{
 				"operation": "backup",
 				"path":      change.FilePath,
 			})
 			if err != nil {
-				respChan <- fmt.Sprintf("\nWarning: Failed to create backup: %v\n", err)
-			} else {
-				change.Backup = result
-				respChan <- fmt.Sprintf("Created backup at: %s\n", result)
+				respChan <- fmt.Sprintf("Error: Failed to create backup: %v\n", err)
+				rollback()
+				return fmt.Errorf("backup creation failed: %v", err)
 			}
+			backups = append(backups, result)
+			respChan <- fmt.Sprintf("Created backup at: %s\n", result)
 		}
 
-		// Get current file content if it exists
+		// Get current file content
 		var currentContent string
 		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
 			content, err := fsTool.Execute(c.ctx, map[string]interface{}{
@@ -898,7 +1049,7 @@ func (c *Copilot) handleModificationPhase(decision *Decision, respChan chan<- st
 			}
 		}
 
-		// Generate the modified content using LLM
+		// Generate modified content
 		modificationPrompt := fmt.Sprintf(`Given the current file content and the proposed change, generate the complete modified content.
 Current content:
 %s
@@ -906,7 +1057,11 @@ Current content:
 Proposed change:
 %s
 
-Provide the complete modified content that can be written to the file:
+Provide the complete modified content that can be written to the file. Ensure:
+1. All necessary imports are included
+2. The code follows best practices and conventions
+3. The changes are properly documented
+4. The code is properly formatted
 `, currentContent, change.Description)
 
 		var modifiedContent strings.Builder
@@ -914,57 +1069,99 @@ Provide the complete modified content that can be written to the file:
 			modifiedContent.WriteString(chunk)
 		}
 
-		_, err := c.llm.SendMessageWithCallback(modificationPrompt, callback)
-		if err != nil {
-			respChan <- fmt.Sprintf("\nError generating modified content: %v\n", err)
-			continue
+		if _, err := c.llm.SendMessageWithCallback(modificationPrompt, callback); err != nil {
+			respChan <- fmt.Sprintf("Error: Failed to generate modified content: %v\n", err)
+			rollback()
+			return fmt.Errorf("content generation failed: %v", err)
 		}
 
-		// Write the modified content using filesystem tool
+		// Write modified content
 		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
-			result, err := fsTool.Execute(c.ctx, map[string]interface{}{
+			if _, err := fsTool.Execute(c.ctx, map[string]interface{}{
 				"operation": "write",
 				"path":      change.FilePath,
 				"content":   modifiedContent.String(),
-			})
-			if err != nil {
-				respChan <- fmt.Sprintf("\nError writing to file %s: %v\n", change.FilePath, err)
-				continue
+			}); err != nil {
+				respChan <- fmt.Sprintf("Error: Failed to write file: %v\n", err)
+				rollback()
+				return fmt.Errorf("file write failed: %v", err)
 			}
-			respChan <- fmt.Sprintf("Successfully wrote changes to file: %s\n", result)
+			respChan <- "Successfully wrote changes to file\n"
 
-			// Run go fmt if it's a Go file
-			if strings.HasSuffix(change.FilePath, ".go") {
-				if runTool := c.tools.GetTool("run_terminal"); runTool != nil {
-					result, err := runTool.Execute(c.ctx, map[string]interface{}{
-						"command": fmt.Sprintf("go fmt %s", change.FilePath),
+			// Run linter check
+			if lintTool := c.tools.GetTool("linter"); lintTool != nil {
+				checkResult, err := lintTool.Execute(c.ctx, map[string]interface{}{
+					"operation": "check",
+					"path":      change.FilePath,
+				})
+				if err != nil {
+					respChan <- fmt.Sprintf("Warning: Linter check failed: %v\n", err)
+				} else if checkResult != "No issues found" {
+					respChan <- fmt.Sprintf("Linter found issues:\n%s\n", checkResult)
+
+					// Try to fix linter issues
+					fixResult, err := lintTool.Execute(c.ctx, map[string]interface{}{
+						"operation": "fix",
+						"path":      change.FilePath,
 					})
 					if err != nil {
-						respChan <- fmt.Sprintf("\nWarning: Failed to format file: %v\n", err)
+						respChan <- fmt.Sprintf("Warning: Failed to fix linter issues: %v\n", err)
 					} else {
-						respChan <- fmt.Sprintf("Formatted file: %s\n", result)
+						respChan <- fmt.Sprintf("Auto-fixed linter issues: %s\n", fixResult)
+
+						// Verify fixes
+						verifyResult, err := lintTool.Execute(c.ctx, map[string]interface{}{
+							"operation": "check",
+							"path":      change.FilePath,
+						})
+						if err != nil {
+							respChan <- fmt.Sprintf("Warning: Failed to verify fixes: %v\n", err)
+						} else if verifyResult != "No issues found" {
+							respChan <- "Warning: Some linter issues remain after auto-fix\n"
+							rollback()
+							return fmt.Errorf("linter issues remain after fix")
+						}
+					}
+				} else {
+					respChan <- "Code passed linter checks\n"
+				}
+			}
+
+			// Format Go files
+			if strings.HasSuffix(change.FilePath, ".go") {
+				if runTool := c.tools.GetTool("run_terminal"); runTool != nil {
+					if _, err := runTool.Execute(c.ctx, map[string]interface{}{
+						"command": fmt.Sprintf("go fmt %s", change.FilePath),
+					}); err != nil {
+						respChan <- fmt.Sprintf("Warning: Failed to format file: %v\n", err)
+					} else {
+						respChan <- "Formatted Go code\n"
 					}
 				}
 			}
 		}
 
-		// Add to git if available
+		// Add to git staging
 		if gitTool := c.tools.GetTool("git"); gitTool != nil {
-			result, err := gitTool.Execute(c.ctx, map[string]interface{}{
+			if _, err := gitTool.Execute(c.ctx, map[string]interface{}{
 				"operation": "add",
 				"path":      change.FilePath,
-			})
-			if err != nil {
-				respChan <- fmt.Sprintf("\nWarning: Failed to add to git: %v\n", err)
+			}); err != nil {
+				respChan <- fmt.Sprintf("Warning: Failed to stage changes: %v\n", err)
 			} else {
-				respChan <- fmt.Sprintf("Added to git staging area: %s\n", result)
+				respChan <- "Added changes to git staging area\n"
 			}
 		}
+
+		// Track successful change
+		appliedChanges = append(appliedChanges, change)
 	}
+
+	return nil
 }
 
 // handleVerificationPhase processes the verification phase
-func (c *Copilot) handleVerificationPhase(decision *Decision, respChan chan<- string) {
+func (c *Copilot) handleVerificationPhase(decision *Decision, respChan chan<- string) error {
 	respChan <- "Verifying changes...\n"
 
 	// Show git diff
@@ -980,6 +1177,7 @@ func (c *Copilot) handleVerificationPhase(decision *Decision, respChan chan<- st
 	}
 
 	respChan <- "\nPlease review the changes and confirm (yes/no): "
+	return nil
 }
 
 // HandleConfirmation processes the user's confirmation response
@@ -1068,4 +1266,235 @@ func (c *Copilot) UpdateTaskState(conf *ChangeConfirmation) {
 		c.agent.CompletedTasks = append(c.agent.CompletedTasks, *c.agent.CurrentTask)
 		c.agent.CurrentTask = nil
 	}
+}
+
+// AutoFixCode automatically analyzes and fixes code issues
+func (c *Copilot) AutoFixCode(ctx context.Context, respChan chan<- string) error {
+	respChan <- "Starting automatic code analysis and fix...\n"
+
+	// Step 1: Detect languages in workspace
+	respChan <- "\nStep 1: Detecting programming languages...\n"
+	if langTool := c.tools.GetTool("language_detector"); langTool != nil {
+		result, err := langTool.Execute(ctx, nil)
+		if err != nil {
+			respChan <- fmt.Sprintf("Warning: Failed to detect languages: %v\n", err)
+		} else {
+			respChan <- result
+		}
+	}
+
+	// Step 2: Find all source files
+	respChan <- "\nStep 2: Scanning for source files...\n"
+	var sourceFiles []string
+	if grepTool := c.tools.GetTool("grep_search"); grepTool != nil {
+		result, err := grepTool.Execute(ctx, map[string]interface{}{
+			"pattern": ".",
+			"depth":   3,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to scan files: %v", err)
+		}
+
+		// Filter source files
+		for _, line := range strings.Split(result, "\n") {
+			if line == "" {
+				continue
+			}
+			if isSourceFile(line) {
+				sourceFiles = append(sourceFiles, line)
+			}
+		}
+		respChan <- fmt.Sprintf("Found %d source files\n", len(sourceFiles))
+	}
+
+	// Step 3: Check each file for issues
+	respChan <- "\nStep 3: Analyzing files for issues...\n"
+	type FileIssue struct {
+		Path    string
+		Content string
+		Issues  string
+	}
+	var filesWithIssues []FileIssue
+
+	for _, file := range sourceFiles {
+		respChan <- fmt.Sprintf("\nChecking %s...\n", file)
+
+		// Read file content
+		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
+			content, err := fsTool.Execute(ctx, map[string]interface{}{
+				"operation": "read",
+				"path":      file,
+			})
+			if err != nil {
+				respChan <- fmt.Sprintf("Warning: Failed to read file: %v\n", err)
+				continue
+			}
+
+			// Run linter check
+			if lintTool := c.tools.GetTool("linter"); lintTool != nil {
+				issues, err := lintTool.Execute(ctx, map[string]interface{}{
+					"operation": "check",
+					"path":      file,
+				})
+				if err != nil {
+					respChan <- fmt.Sprintf("Warning: Failed to check file: %v\n", err)
+					continue
+				}
+
+				if issues != "No issues found" {
+					filesWithIssues = append(filesWithIssues, FileIssue{
+						Path:    file,
+						Content: content,
+						Issues:  issues,
+					})
+					respChan <- fmt.Sprintf("Found issues:\n%s\n", issues)
+				} else {
+					respChan <- "No issues found\n"
+				}
+			}
+		}
+	}
+
+	// Step 4: Generate and apply fixes
+	if len(filesWithIssues) > 0 {
+		respChan <- fmt.Sprintf("\nStep 4: Fixing issues in %d files...\n", len(filesWithIssues))
+		for _, file := range filesWithIssues {
+			respChan <- fmt.Sprintf("\nFixing %s...\n", file.Path)
+
+			// Create backup
+			if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
+				result, err := fsTool.Execute(ctx, map[string]interface{}{
+					"operation": "backup",
+					"path":      file.Path,
+				})
+				if err != nil {
+					respChan <- fmt.Sprintf("Warning: Failed to create backup: %v\n", err)
+				} else {
+					respChan <- fmt.Sprintf("Created backup at: %s\n", result)
+				}
+			}
+
+			// Generate fix using LLM
+			fixPrompt := fmt.Sprintf(`Analyze the following code and its issues, then provide a fixed version:
+
+File: %s
+
+Current code:
+%s
+
+Issues found:
+%s
+
+Please provide the complete fixed code that resolves these issues:
+`, file.Path, file.Content, file.Issues)
+
+			var fixedContent strings.Builder
+			callback := func(chunk string) {
+				fixedContent.WriteString(chunk)
+			}
+
+			_, err := c.llm.SendMessageWithCallback(fixPrompt, callback)
+			if err != nil {
+				respChan <- fmt.Sprintf("Error generating fix: %v\n", err)
+				continue
+			}
+
+			// Apply the fix
+			if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
+				_, err := fsTool.Execute(ctx, map[string]interface{}{
+					"operation": "write",
+					"path":      file.Path,
+					"content":   fixedContent.String(),
+				})
+				if err != nil {
+					respChan <- fmt.Sprintf("Error applying fix: %v\n", err)
+					continue
+				}
+
+				// Run linter again to verify fix
+				if lintTool := c.tools.GetTool("linter"); lintTool != nil {
+					verifyResult, err := lintTool.Execute(ctx, map[string]interface{}{
+						"operation": "check",
+						"path":      file.Path,
+					})
+					if err != nil {
+						respChan <- fmt.Sprintf("Warning: Failed to verify fix: %v\n", err)
+					} else if verifyResult == "No issues found" {
+						respChan <- "Fix successful - no issues remaining\n"
+					} else {
+						respChan <- fmt.Sprintf("Some issues remain:\n%s\n", verifyResult)
+					}
+				}
+
+				// Format code if it's a Go file
+				if strings.HasSuffix(file.Path, ".go") {
+					if runTool := c.tools.GetTool("run_terminal"); runTool != nil {
+						_, err := runTool.Execute(ctx, map[string]interface{}{
+							"command": fmt.Sprintf("go fmt %s", file.Path),
+						})
+						if err != nil {
+							respChan <- fmt.Sprintf("Warning: Failed to format file: %v\n", err)
+						} else {
+							respChan <- "Formatted Go code\n"
+						}
+					}
+				}
+			}
+		}
+	} else {
+		respChan <- "\nNo issues found in any files!\n"
+	}
+
+	return nil
+}
+
+// isSourceFile checks if a file is a source code file
+func isSourceFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	sourceExts := map[string]bool{
+		".go":    true,
+		".py":    true,
+		".js":    true,
+		".ts":    true,
+		".jsx":   true,
+		".tsx":   true,
+		".java":  true,
+		".cpp":   true,
+		".c":     true,
+		".h":     true,
+		".rb":    true,
+		".php":   true,
+		".rs":    true,
+		".swift": true,
+		".kt":    true,
+		".scala": true,
+		".cs":    true,
+		".fs":    true,
+	}
+	return sourceExts[ext]
+}
+
+// isAutoFixRequest checks if the prompt is requesting automatic code fixing
+func isAutoFixRequest(prompt string) bool {
+	prompt = strings.ToLower(strings.TrimSpace(prompt))
+	fixKeywords := []string{
+		"fix code",
+		"fix issues",
+		"fix bugs",
+		"repair code",
+		"auto fix",
+		"autofix",
+		"fix errors",
+		"修复代码",
+		"修复问题",
+		"修复错误",
+		"自动修复",
+	}
+
+	for _, keyword := range fixKeywords {
+		if strings.Contains(prompt, keyword) {
+			return true
+		}
+	}
+	return false
 }
