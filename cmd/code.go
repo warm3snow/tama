@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -14,10 +15,10 @@ var codeCmd = &cobra.Command{
 	Use:   "code [request]",
 	Short: "Get AI assistance with code",
 	Long: `Get AI assistance with your code. You can:
-- Ask questions about code
-- Get code explanations
-- Request code reviews
-- Get suggestions for improvements`,
+- Start a coding project
+- Let AI automatically implement features
+- Fix bugs and improve code quality
+- Review and rollback changes`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Print logo before starting
 		PrintLogo("Code")
@@ -29,22 +30,44 @@ var codeCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// Check if we have a request
-		if len(args) > 0 {
-			// Process single request
-			request := strings.Join(args, " ")
-			respChan, err := cop.ProcessPrompt(request)
+		// Get project path
+		projectPath, _ := cmd.Flags().GetString("project")
+		if projectPath == "" {
+			// Use current directory if not specified
+			var err error
+			projectPath, err = os.Getwd()
 			if err != nil {
-				logging.LogError("Failed to process code request", "error", err)
+				logging.LogError("Failed to get current directory", "error", err)
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
 			}
-
-			// Print response
-			for chunk := range respChan {
-				fmt.Print(chunk)
+		} else {
+			// Convert to absolute path
+			var err error
+			projectPath, err = filepath.Abs(projectPath)
+			if err != nil {
+				logging.LogError("Failed to resolve project path", "error", err)
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
 			}
-			fmt.Println()
+		}
+
+		// Set project path in copilot
+		if err := cop.SetProjectPath(projectPath); err != nil {
+			logging.LogError("Failed to set project path", "error", err)
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Check if we have a request
+		if len(args) > 0 {
+			// Process single request in agent mode
+			request := strings.Join(args, " ")
+			if err := cop.StartAgentMode(request); err != nil {
+				logging.LogError("Agent mode failed", "error", err)
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
 		} else {
 			// Start interactive session
 			if err := cop.StartInteractiveChat(); err != nil {
@@ -62,4 +85,5 @@ func init() {
 	// Add flags specific to code command
 	codeCmd.Flags().StringP("model", "m", "", "Specify the AI model to use")
 	codeCmd.Flags().StringP("provider", "p", "", "Specify the AI provider (openai, ollama)")
+	codeCmd.Flags().StringP("project", "d", "", "Specify the project directory (default: current directory)")
 }

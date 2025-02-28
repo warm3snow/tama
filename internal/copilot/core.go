@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/chzyer/readline"
 	"github.com/fatih/color"
@@ -16,6 +17,14 @@ import (
 	"github.com/warm3snow/tama/internal/tools"
 	"github.com/warm3snow/tama/internal/workspace"
 )
+
+// AgentState represents the current state of the agent
+type AgentState struct {
+	Goal        string
+	CurrentTask string
+	Changes     []string
+	StartTime   time.Time
+}
 
 // Copilot orchestrates the interaction between user, LLM, and tools
 type Copilot struct {
@@ -28,6 +37,7 @@ type Copilot struct {
 	userStyle *color.Color
 	aiStyle   *color.Color
 	cmdStyle  *color.Color
+	agent     *AgentState
 	mu        sync.RWMutex
 }
 
@@ -188,17 +198,21 @@ func (c *Copilot) ProcessPrompt(prompt string) (<-chan string, error) {
 	tools := c.tools.GetToolDescriptions()
 
 	// Create system message with tools
-	systemMsg := fmt.Sprintf(`You are a powerful AI assistant with access to the following tools:
-%s
+	systemMsg := fmt.Sprintf(`You are a powerful AI coding assistant. You have access to various tools to help with coding tasks.
+Your responses should follow this format:
 
-To use a tool, respond with a JSON object in the format:
-{
-    "tool": "tool_name",
-    "args": {
-        "arg1": "value1",
-        "arg2": "value2"
-    }
-}
+1. First, explain your thinking process and what you plan to do
+2. Then, if you need to create or modify files, explain the changes you'll make
+3. Finally, execute the necessary actions using the tools available to you
+
+When writing code:
+- Always add necessary imports
+- Ensure the code is complete and can run
+- Follow best practices and conventions
+- Add helpful comments to explain complex logic
+
+Available tools:
+%s
 
 Current workspace: %s
 `, formatTools(tools), wsContext["root"])
@@ -214,12 +228,15 @@ Current workspace: %s
 		callback := func(chunk string) {
 			// Check if it's a tool call
 			if tool := c.tools.ParseToolCall(chunk); tool != nil {
+				// Execute tool but don't print the call details
 				result := tool.Execute(c.ctx)
-				// Send tool result back to user
-				select {
-				case <-c.ctx.Done():
-					return
-				case respChan <- fmt.Sprintf("Tool result: %s\n", result):
+				// Only print errors if any
+				if strings.Contains(result, "error") || strings.Contains(result, "Error") {
+					select {
+					case <-c.ctx.Done():
+						return
+					case respChan <- fmt.Sprintf("\nError: %s\n", result):
+					}
 				}
 				return
 			}
@@ -297,4 +314,105 @@ func (c *Copilot) GetGitContext(command string) (string, error) {
 	return tool.Execute(c.ctx, map[string]interface{}{
 		"command": fmt.Sprintf("git %s", command),
 	})
+}
+
+// SetProjectPath sets the project path for the workspace
+func (c *Copilot) SetProjectPath(path string) error {
+	return c.workspace.SetWorkspacePath(path)
+}
+
+// StartAgentMode starts the AI agent mode with a specific goal
+func (c *Copilot) StartAgentMode(goal string) error {
+	c.mu.Lock()
+	c.agent = &AgentState{
+		Goal:      goal,
+		StartTime: time.Now(),
+		Changes:   make([]string, 0),
+	}
+	c.mu.Unlock()
+
+	// Show welcome message
+	c.cmdStyle.Printf("\nStarting AI Agent mode with goal: %s\n\n", goal)
+
+	// Create system message for agent mode
+	systemMsg := fmt.Sprintf(`You are a powerful AI coding assistant working on the following goal:
+
+%s
+
+Follow these steps for each task:
+
+1. ANALYZE: First, analyze the current state and explain your thinking process
+2. PLAN: Describe what changes you plan to make and why
+3. IMPLEMENT: Make the necessary code changes
+4. VERIFY: Explain how the changes achieve the goal
+
+When writing code:
+- Always add necessary imports
+- Ensure the code is complete and can run
+- Follow best practices and conventions
+- Add helpful comments to explain complex logic
+
+Available tools:
+%s
+
+Current workspace: %s
+`, goal, formatTools(c.tools.GetToolDescriptions()), c.workspace.GetSummary()["root"])
+
+	// Add system message to LLM
+	c.llm.AddSystemMessage(systemMsg)
+
+	// Start the agent loop
+	return c.runAgentLoop()
+}
+
+// runAgentLoop runs the main agent loop
+func (c *Copilot) runAgentLoop() error {
+	for {
+		// Get next action from LLM
+		respChan, err := c.ProcessPrompt("Continue working on the goal. What's your next step?")
+		if err != nil {
+			return fmt.Errorf("agent error: %v", err)
+		}
+
+		// Process response
+		var response strings.Builder
+		for chunk := range respChan {
+			response.WriteString(chunk)
+			// Also print the chunk to show real-time progress
+			fmt.Print(chunk)
+		}
+
+		// Ask user if they want to continue
+		c.cmdStyle.Print("\nContinue with the next step? (yes/no/rollback): ")
+		rl, err := readline.New("")
+		if err != nil {
+			return err
+		}
+		input, err := rl.Readline()
+		if err != nil {
+			return err
+		}
+
+		switch strings.ToLower(strings.TrimSpace(input)) {
+		case "yes", "y":
+			continue
+		case "no", "n":
+			return nil
+		case "rollback":
+			return c.rollbackChanges()
+		default:
+			c.cmdStyle.Println("Invalid input. Continuing...")
+		}
+	}
+}
+
+// rollbackChanges rolls back the changes made by the agent
+func (c *Copilot) rollbackChanges() error {
+	c.cmdStyle.Println("Rolling back changes...")
+	// TODO: Implement rollback functionality
+	// This would involve:
+	// 1. Keeping track of file changes
+	// 2. Creating backup copies
+	// 3. Restoring from backups
+	return nil
 }

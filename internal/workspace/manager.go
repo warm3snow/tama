@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -135,4 +136,26 @@ func (m *Manager) GetWorkspacePath() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.root
+}
+
+// SetWorkspacePath sets the workspace root path
+func (m *Manager) SetWorkspacePath(path string) error {
+	// Check if path exists and is a directory
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("path is not a directory: %s", path)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Clear existing open files
+	m.openFiles = make(map[string]*File)
+
+	// Set new root path
+	m.root = path
+	return nil
 }
