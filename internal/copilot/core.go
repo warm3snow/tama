@@ -321,49 +321,34 @@ Current workspace: %s
 				// Execute tool and get result
 				result := toolCall.Execute(c.ctx)
 
-				// If it's a git diff operation, print the result directly
-				if strings.Contains(chunk, `"tool":"git"`) && strings.Contains(chunk, `"operation":"diff"`) {
-					select {
-					case <-c.ctx.Done():
-						return
-					case respChan <- "\nChanges made:\n" + result:
-					}
-					return
+				// Handle specific tool responses
+				toolName := ""
+				if strings.Contains(chunk, `"tool":"edit_file"`) {
+					toolName = "edit_file"
+				} else if strings.Contains(chunk, `"tool":"run_terminal"`) {
+					toolName = "run_terminal"
 				}
 
-				// For other tools, only print errors
-				if strings.Contains(result, "error") || strings.Contains(result, "Error") {
-					select {
-					case <-c.ctx.Done():
-						return
-					case respChan <- fmt.Sprintf("\nError: %s\n", result):
-					}
-				} else {
-					// Print success message for edit operations
-					if strings.Contains(chunk, `"tool":"edit_file"`) {
-						select {
-						case <-c.ctx.Done():
-							return
-						case respChan <- "\nFile updated successfully.\n":
-						}
-						// After file edit, show git diff
-						if gitTool := c.tools.GetTool("git"); gitTool != nil {
-							if diff, err := gitTool.Execute(c.ctx, map[string]interface{}{
-								"operation": "diff",
-							}); err == nil && diff != "No changes detected" {
-								select {
-								case <-c.ctx.Done():
-									return
-								case respChan <- "\nChanges made:\n" + diff:
-								}
-							}
+				switch toolName {
+				case "edit_file":
+					respChan <- fmt.Sprintf("\nApplied changes to file: %s\n", result)
+					// Show git diff after edit
+					if gitTool := c.tools.GetTool("git"); gitTool != nil {
+						if diff, err := gitTool.Execute(c.ctx, map[string]interface{}{
+							"operation": "diff",
+						}); err == nil && diff != "" {
+							respChan <- fmt.Sprintf("\nChanges made:\n%s\n", diff)
 						}
 					}
+				case "run_terminal":
+					respChan <- fmt.Sprintf("\nCommand output:\n%s\n", result)
+				default:
+					respChan <- fmt.Sprintf("\nTool result: %s\n", result)
 				}
 				return
 			}
 
-			// Stream response to user
+			// Stream regular response to user
 			select {
 			case <-c.ctx.Done():
 				return
@@ -889,15 +874,15 @@ func (c *Copilot) handleModificationPhase(decision *Decision, respChan chan<- st
 
 		// Create backup using filesystem tool
 		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
-			backupPath, err := fsTool.Execute(c.ctx, map[string]interface{}{
+			result, err := fsTool.Execute(c.ctx, map[string]interface{}{
 				"operation": "backup",
 				"path":      change.FilePath,
 			})
 			if err != nil {
 				respChan <- fmt.Sprintf("\nWarning: Failed to create backup: %v\n", err)
 			} else {
-				change.Backup = backupPath
-				respChan <- fmt.Sprintf("Created backup at: %s\n", backupPath)
+				change.Backup = result
+				respChan <- fmt.Sprintf("Created backup at: %s\n", result)
 			}
 		}
 
@@ -935,7 +920,7 @@ Provide the complete modified content that can be written to the file:
 			continue
 		}
 
-		// Apply change using filesystem tool
+		// Write the modified content using filesystem tool
 		if fsTool := c.tools.GetTool("filesystem"); fsTool != nil {
 			result, err := fsTool.Execute(c.ctx, map[string]interface{}{
 				"operation": "write",
@@ -943,22 +928,36 @@ Provide the complete modified content that can be written to the file:
 				"content":   modifiedContent.String(),
 			})
 			if err != nil {
-				respChan <- fmt.Sprintf("\nError applying change to %s: %v\n", change.FilePath, err)
+				respChan <- fmt.Sprintf("\nError writing to file %s: %v\n", change.FilePath, err)
 				continue
 			}
-			respChan <- fmt.Sprintf("Applied change: %s\n", result)
+			respChan <- fmt.Sprintf("Successfully wrote changes to file: %s\n", result)
+
+			// Run go fmt if it's a Go file
+			if strings.HasSuffix(change.FilePath, ".go") {
+				if runTool := c.tools.GetTool("run_terminal"); runTool != nil {
+					result, err := runTool.Execute(c.ctx, map[string]interface{}{
+						"command": fmt.Sprintf("go fmt %s", change.FilePath),
+					})
+					if err != nil {
+						respChan <- fmt.Sprintf("\nWarning: Failed to format file: %v\n", err)
+					} else {
+						respChan <- fmt.Sprintf("Formatted file: %s\n", result)
+					}
+				}
+			}
 		}
 
 		// Add to git if available
 		if gitTool := c.tools.GetTool("git"); gitTool != nil {
-			_, err := gitTool.Execute(c.ctx, map[string]interface{}{
+			result, err := gitTool.Execute(c.ctx, map[string]interface{}{
 				"operation": "add",
 				"path":      change.FilePath,
 			})
 			if err != nil {
 				respChan <- fmt.Sprintf("\nWarning: Failed to add to git: %v\n", err)
 			} else {
-				respChan <- "Added to git staging area\n"
+				respChan <- fmt.Sprintf("Added to git staging area: %s\n", result)
 			}
 		}
 	}
