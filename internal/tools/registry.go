@@ -12,7 +12,7 @@ type Tool interface {
 	Execute(ctx context.Context, args map[string]interface{}) (string, error)
 }
 
-// Registry manages available tools
+// Registry manages the available tools
 type Registry struct {
 	tools map[string]Tool
 }
@@ -24,9 +24,14 @@ func NewRegistry() *Registry {
 	}
 }
 
-// RegisterTool adds a tool to the registry
+// RegisterTool registers a tool with the registry
 func (r *Registry) RegisterTool(tool Tool) {
 	r.tools[tool.Name()] = tool
+}
+
+// GetTool returns a tool by name
+func (r *Registry) GetTool(name string) Tool {
+	return r.tools[name]
 }
 
 // GetToolDescriptions returns descriptions of all registered tools

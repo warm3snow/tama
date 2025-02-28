@@ -15,6 +15,7 @@ Tama AI Assistant provides a clean, distraction-free terminal interface for inte
 - 💬 **Interactive Chat** - Natural conversation with AI in your terminal
 - 🔧 **Tool Integration** - AI can use tools to help with your tasks
 - 📁 **Context-aware** - Powerful contextual operations for files, folders, codebase, git, and web
+- 🤝 **Agent Mode** - Autonomous AI agent that can implement features and fix bugs
 - ⚡ **Fast & Efficient** - Written in Go for optimal performance
 - 🎨 **Beautiful UI** - Clean, modern terminal interface
 - 🔒 **Secure** - Local configuration and secure API handling
@@ -61,6 +62,18 @@ Get AI assistance with specific tasks:
 ```bash
 tama chat "Explain how this code works"
 ```
+
+Start agent mode with a specific goal:
+```bash
+tama code --goal "Implement user authentication"
+```
+
+In agent mode, you can:
+- `[a]ccept` - Accept and commit the current changes
+- `[r]eject` - Reject and rollback the current changes
+- `[A]ll` - Reject all changes and exit
+- `[d]iff` - Show detailed changes
+- `[q]uit` - Exit agent mode
 
 ## Context Commands
 

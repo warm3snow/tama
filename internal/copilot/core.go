@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -24,14 +26,25 @@ type Change struct {
 	Description string
 	Timestamp   time.Time
 	Backup      string // Path to backup file
+	Status      string // Status of the change (e.g., "modified", "added", "deleted")
+}
+
+// TaskState represents the state of a task
+type TaskState struct {
+	Description string
+	StartTime   time.Time
+	EndTime     time.Time
+	Status      string // "in_progress", "completed", "failed", "rejected"
+	Changes     []Change
 }
 
 // AgentState represents the current state of the agent
 type AgentState struct {
-	Goal        string
-	CurrentTask string
-	Changes     []Change
-	StartTime   time.Time
+	Goal           string
+	CurrentTask    *TaskState
+	CompletedTasks []TaskState
+	StartTime      time.Time
+	LastActivity   time.Time
 }
 
 // Copilot orchestrates the interaction between user, LLM, and tools
@@ -203,8 +216,8 @@ func (c *Copilot) ProcessPrompt(prompt string) (<-chan string, error) {
 	// Get workspace context
 	wsContext := c.workspace.GetSummary()
 
-	// Get available tools
-	tools := c.tools.GetToolDescriptions()
+	// Get available tools descriptions
+	toolDescs := c.tools.GetToolDescriptions()
 
 	// Create system message with tools
 	systemMsg := fmt.Sprintf(`You are a powerful AI coding assistant. You have access to various tools to help with coding tasks.
@@ -220,11 +233,16 @@ When writing code:
 - Follow best practices and conventions
 - Add helpful comments to explain complex logic
 
+Important:
+- Always use edit_file tool to make code changes
+- Always use git tool to show changes
+- Start each response with "Task: <brief task description>"
+
 Available tools:
 %s
 
 Current workspace: %s
-`, formatTools(tools), wsContext["root"])
+`, formatTools(toolDescs), wsContext["root"])
 
 	// Add system message to LLM
 	c.llm.AddSystemMessage(systemMsg)
@@ -236,15 +254,47 @@ Current workspace: %s
 		// Create callback for streaming responses
 		callback := func(chunk string) {
 			// Check if it's a tool call
-			if tool := c.tools.ParseToolCall(chunk); tool != nil {
-				// Execute tool but don't print the call details
-				result := tool.Execute(c.ctx)
-				// Only print errors if any
+			if toolCall := c.tools.ParseToolCall(chunk); toolCall != nil {
+				// Execute tool and get result
+				result := toolCall.Execute(c.ctx)
+
+				// If it's a git diff operation, print the result directly
+				if strings.Contains(chunk, `"tool":"git"`) && strings.Contains(chunk, `"operation":"diff"`) {
+					select {
+					case <-c.ctx.Done():
+						return
+					case respChan <- "\nChanges made:\n" + result:
+					}
+					return
+				}
+
+				// For other tools, only print errors
 				if strings.Contains(result, "error") || strings.Contains(result, "Error") {
 					select {
 					case <-c.ctx.Done():
 						return
 					case respChan <- fmt.Sprintf("\nError: %s\n", result):
+					}
+				} else {
+					// Print success message for edit operations
+					if strings.Contains(chunk, `"tool":"edit_file"`) {
+						select {
+						case <-c.ctx.Done():
+							return
+						case respChan <- "\nFile updated successfully.\n":
+						}
+						// After file edit, show git diff
+						if gitTool := c.tools.GetTool("git"); gitTool != nil {
+							if diff, err := gitTool.Execute(c.ctx, map[string]interface{}{
+								"operation": "diff",
+							}); err == nil && diff != "No changes detected" {
+								select {
+								case <-c.ctx.Done():
+									return
+								case respChan <- "\nChanges made:\n" + diff:
+								}
+							}
+						}
 					}
 				}
 				return
@@ -334,9 +384,10 @@ func (c *Copilot) SetProjectPath(path string) error {
 func (c *Copilot) StartAgentMode(goal string) error {
 	c.mu.Lock()
 	c.agent = &AgentState{
-		Goal:      goal,
-		StartTime: time.Now(),
-		Changes:   make([]Change, 0),
+		Goal:           goal,
+		StartTime:      time.Now(),
+		LastActivity:   time.Now(),
+		CompletedTasks: make([]TaskState, 0),
 	}
 	c.mu.Unlock()
 
@@ -360,6 +411,7 @@ When writing code:
 - Ensure the code is complete and can run
 - Follow best practices and conventions
 - Add helpful comments to explain complex logic
+- Start each response with "Task: <brief task description>"
 
 Available tools:
 %s
@@ -383,23 +435,61 @@ func (c *Copilot) runAgentLoop() error {
 			return fmt.Errorf("agent error: %v", err)
 		}
 
-		// Process response
+		// Process response and extract task description
 		var response strings.Builder
+		taskDesc := ""
 		for chunk := range respChan {
 			response.WriteString(chunk)
+			// Extract task description from the first line
+			if taskDesc == "" && strings.HasPrefix(chunk, "Task:") {
+				taskDesc = strings.TrimSpace(strings.TrimPrefix(chunk, "Task:"))
+			}
 			// Also print the chunk to show real-time progress
 			fmt.Print(chunk)
 		}
 
+		// Update agent state with new task
+		c.mu.Lock()
+		if c.agent.CurrentTask != nil {
+			// Complete the previous task
+			c.agent.CurrentTask.EndTime = time.Now()
+			c.agent.CurrentTask.Status = "completed"
+			c.agent.CompletedTasks = append(c.agent.CompletedTasks, *c.agent.CurrentTask)
+		}
+		c.agent.CurrentTask = &TaskState{
+			Description: taskDesc,
+			StartTime:   time.Now(),
+			Status:      "in_progress",
+			Changes:     make([]Change, 0),
+		}
+		c.agent.LastActivity = time.Now()
+		c.mu.Unlock()
+
 		// Show changes if any were made
 		gitTool := tools.NewGitTool(c.workspace.GetWorkspacePath())
-		if diff, err := gitTool.Execute(c.ctx, map[string]interface{}{"operation": "diff"}); err == nil && diff != "" {
-			c.cmdStyle.Println("\nChanges made:")
-			fmt.Println(diff)
+		diff, err := gitTool.Execute(c.ctx, map[string]interface{}{"operation": "diff"})
+		if err != nil {
+			c.cmdStyle.Printf("\nError getting changes: %v\n", err)
+		} else if diff != "No changes detected" {
+			fmt.Print(diff) // Print the colored diff output with file status
+		}
+
+		// Create a backup of changed files
+		if err := c.backupChangedFiles(); err != nil {
+			c.cmdStyle.Printf("\nWarning: Failed to create backup: %v\n", err)
 		}
 
 		// Ask user for action
-		c.cmdStyle.Print("\nWhat would you like to do? [a]ccept/[r]eject/reject [A]ll/show [d]iff/[q]uit: ")
+		c.cmdStyle.Print("\nWhat would you like to do?\n")
+		c.cmdStyle.Println("  [a]ccept     - Accept and commit the current changes")
+		c.cmdStyle.Println("  [r]eject     - Reject and rollback the current changes")
+		c.cmdStyle.Println("  [A]ll        - Reject all changes and exit")
+		c.cmdStyle.Println("  [d]iff       - Show detailed changes")
+		c.cmdStyle.Println("  [s]ummary    - Show task summary")
+		c.cmdStyle.Println("  [p]rogress   - Show overall progress")
+		c.cmdStyle.Println("  [q]uit       - Exit agent mode")
+		c.cmdStyle.Print("\nEnter your choice: ")
+
 		rl, err := readline.New("")
 		if err != nil {
 			return err
@@ -411,38 +501,182 @@ func (c *Copilot) runAgentLoop() error {
 
 		switch strings.ToLower(strings.TrimSpace(input)) {
 		case "a", "accept":
+			// Add the change to history before committing
+			c.mu.Lock()
+			if c.agent.CurrentTask != nil {
+				c.agent.CurrentTask.Status = "completed"
+			}
+			c.mu.Unlock()
+
 			// Commit changes
 			if _, err := gitTool.Execute(c.ctx, map[string]interface{}{
 				"operation": "commit",
-				"message":   fmt.Sprintf("Auto commit: %s", c.agent.CurrentTask),
+				"message":   fmt.Sprintf("Auto commit: %s", taskDesc),
 			}); err != nil {
 				c.cmdStyle.Printf("Failed to commit changes: %v\n", err)
+			} else {
+				c.cmdStyle.Println("Changes committed successfully.")
 			}
 			continue
+
 		case "r", "reject":
+			// Update task status
+			c.mu.Lock()
+			if c.agent.CurrentTask != nil {
+				c.agent.CurrentTask.Status = "rejected"
+			}
+			c.mu.Unlock()
+
 			// Reset current changes
 			if _, err := gitTool.Execute(c.ctx, map[string]interface{}{"operation": "reset"}); err != nil {
 				c.cmdStyle.Printf("Failed to reset changes: %v\n", err)
+			} else {
+				c.cmdStyle.Println("Changes reset successfully.")
 			}
 			continue
+
 		case "d", "diff":
 			// Show detailed diff
 			if diff, err := gitTool.Execute(c.ctx, map[string]interface{}{"operation": "diff"}); err == nil {
-				fmt.Println("\nDetailed changes:")
-				fmt.Println(diff)
+				fmt.Print("\nDetailed changes:\n", diff)
 			}
 			continue
+
+		case "s", "summary":
+			c.showTaskSummary()
+			continue
+
+		case "p", "progress":
+			c.showProgress()
+			continue
+
 		case "A", "all":
+			// Update all incomplete tasks as rejected
+			c.mu.Lock()
+			if c.agent.CurrentTask != nil {
+				c.agent.CurrentTask.Status = "rejected"
+			}
+			c.mu.Unlock()
+
 			// Reset all changes and exit
 			if _, err := gitTool.Execute(c.ctx, map[string]interface{}{"operation": "reset"}); err != nil {
 				c.cmdStyle.Printf("Failed to reset changes: %v\n", err)
+			} else {
+				c.cmdStyle.Println("All changes reset successfully.")
 			}
 			return nil
+
 		case "q", "quit":
 			return nil
+
 		default:
 			c.cmdStyle.Println("Invalid input. Please try again.")
 			continue
 		}
+	}
+}
+
+// backupChangedFiles creates backups of modified files
+func (c *Copilot) backupChangedFiles() error {
+	// Get list of modified files
+	gitTool := tools.NewRunTerminalTool(c.workspace.GetWorkspacePath())
+	output, err := gitTool.Execute(c.ctx, map[string]interface{}{
+		"command": "git status --porcelain",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get modified files: %v", err)
+	}
+
+	// Create backup directory if it doesn't exist
+	backupDir := filepath.Join(c.workspace.GetWorkspacePath(), ".tama", "backups",
+		time.Now().Format("20060102_150405"))
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		return fmt.Errorf("failed to create backup directory: %v", err)
+	}
+
+	// Process each modified file
+	for _, line := range strings.Split(output, "\n") {
+		if len(line) < 3 {
+			continue
+		}
+		status := line[:2]
+		file := strings.TrimSpace(line[3:])
+
+		// Skip untracked files
+		if status == "??" {
+			continue
+		}
+
+		// Copy file to backup directory
+		srcPath := filepath.Join(c.workspace.GetWorkspacePath(), file)
+		dstPath := filepath.Join(backupDir, file)
+
+		// Create destination directory if needed
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+			return fmt.Errorf("failed to create backup subdirectory for %s: %v", file, err)
+		}
+
+		// Copy file
+		if err := c.copyFile(srcPath, dstPath); err != nil {
+			return fmt.Errorf("failed to backup %s: %v", file, err)
+		}
+	}
+
+	return nil
+}
+
+// copyFile copies a file from src to dst
+func (c *Copilot) copyFile(src, dst string) error {
+	input, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, input, 0644)
+}
+
+// showTaskSummary displays a summary of the current task and changes
+func (c *Copilot) showTaskSummary() {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	c.cmdStyle.Println("\nTask Summary:")
+	fmt.Printf("Goal: %s\n", c.agent.Goal)
+	fmt.Printf("Current Task: %s\n", c.agent.CurrentTask.Description)
+	fmt.Printf("Start Time: %s\n", c.agent.CurrentTask.StartTime.Format(time.RFC3339))
+	fmt.Printf("Duration: %s\n", time.Since(c.agent.CurrentTask.StartTime).Round(time.Second))
+
+	if len(c.agent.CompletedTasks) > 0 {
+		fmt.Println("\nCompleted Tasks:")
+		for i, task := range c.agent.CompletedTasks {
+			duration := task.EndTime.Sub(task.StartTime).Round(time.Second)
+			fmt.Printf("%d. %s (%s) - %s\n", i+1, task.Description, task.Status, duration)
+		}
+	}
+}
+
+// showProgress displays overall progress information
+func (c *Copilot) showProgress() {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	c.cmdStyle.Println("\nOverall Progress:")
+	fmt.Printf("Goal: %s\n", c.agent.Goal)
+	fmt.Printf("Started: %s\n", c.agent.StartTime.Format(time.RFC3339))
+	fmt.Printf("Duration: %s\n", time.Since(c.agent.StartTime).Round(time.Second))
+	fmt.Printf("Last Activity: %s\n", time.Since(c.agent.LastActivity).Round(time.Second))
+
+	if len(c.agent.CompletedTasks) > 0 {
+		fmt.Println("\nCompleted Tasks:")
+		for i, task := range c.agent.CompletedTasks {
+			duration := task.EndTime.Sub(task.StartTime).Round(time.Second)
+			fmt.Printf("%d. %s (%s) - %s\n", i+1, task.Description, task.Status, duration)
+		}
+	}
+
+	if c.agent.CurrentTask != nil {
+		fmt.Printf("\nCurrent Task: %s\n", c.agent.CurrentTask.Description)
+		fmt.Printf("Status: %s\n", c.agent.CurrentTask.Status)
+		duration := time.Since(c.agent.CurrentTask.StartTime).Round(time.Second)
+		fmt.Printf("Duration: %s\n", duration)
 	}
 }

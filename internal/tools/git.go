@@ -3,7 +3,10 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 )
 
 // GitTool implements git operations
@@ -48,15 +51,105 @@ func (t *GitTool) Execute(ctx context.Context, args map[string]interface{}) (str
 
 // getDiff returns the current changes in the workspace
 func (t *GitTool) getDiff(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "diff")
+	// First check if there are any changes
+	statusCmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
+	statusCmd.Dir = t.workspacePath
+	status, err := statusCmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git status failed: %v", err)
+	}
+
+	// Process status output to show file states
+	var result strings.Builder
+	if len(status) > 0 {
+		result.WriteString("\nChanged files:\n")
+		for _, line := range strings.Split(string(status), "\n") {
+			if len(line) < 3 {
+				continue
+			}
+			state := line[:2]
+			file := strings.TrimSpace(line[3:])
+			switch state {
+			case "M ":
+				result.WriteString(fmt.Sprintf("  Modified:   %s\n", file))
+			case " M":
+				result.WriteString(fmt.Sprintf("  Modified (unstaged): %s\n", file))
+			case "A ":
+				result.WriteString(fmt.Sprintf("  Added:      %s\n", file))
+			case "D ":
+				result.WriteString(fmt.Sprintf("  Deleted:    %s\n", file))
+			case "R ":
+				result.WriteString(fmt.Sprintf("  Renamed:    %s\n", file))
+			case "C ":
+				result.WriteString(fmt.Sprintf("  Copied:     %s\n", file))
+			case "??":
+				result.WriteString(fmt.Sprintf("  Untracked:  %s\n", file))
+			}
+		}
+		result.WriteString("\n")
+	} else {
+		return "No changes detected", nil
+	}
+
+	// Get both staged and unstaged changes
+	cmd := exec.CommandContext(ctx, "git", "diff", "--color")
 	cmd.Dir = t.workspacePath
 
-	output, err := cmd.Output()
+	// Capture both stdout and stderr
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
 	if err != nil {
+		if stderr.Len() > 0 {
+			return "", fmt.Errorf("git diff failed: %s", stderr.String())
+		}
 		return "", fmt.Errorf("git diff failed: %v", err)
 	}
 
-	return string(output), nil
+	// Get staged changes
+	stagedCmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--color")
+	stagedCmd.Dir = t.workspacePath
+
+	var stagedOut strings.Builder
+	stagedCmd.Stdout = &stagedOut
+	stagedCmd.Stderr = &stderr
+
+	err = stagedCmd.Run()
+	if err != nil {
+		if stderr.Len() > 0 {
+			return "", fmt.Errorf("git diff --cached failed: %s", stderr.String())
+		}
+		return "", fmt.Errorf("git diff --cached failed: %v", err)
+	}
+
+	// Show staged changes
+	if stagedOut.Len() > 0 {
+		result.WriteString("\nStaged changes:\n")
+		result.WriteString(stagedOut.String())
+	}
+
+	// Show unstaged changes
+	if stdout.Len() > 0 {
+		result.WriteString("\nUnstaged changes:\n")
+		result.WriteString(stdout.String())
+	}
+
+	// Get untracked files content
+	for _, line := range strings.Split(string(status), "\n") {
+		if strings.HasPrefix(line, "??") {
+			file := strings.TrimSpace(line[3:])
+			content, err := os.ReadFile(filepath.Join(t.workspacePath, file))
+			if err == nil {
+				result.WriteString(fmt.Sprintf("\nNew file: %s\n", file))
+				result.WriteString(string(content))
+				result.WriteString("\n")
+			}
+		}
+	}
+
+	return result.String(), nil
 }
 
 // commit stages and commits all changes
