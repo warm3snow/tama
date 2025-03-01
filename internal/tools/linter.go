@@ -25,7 +25,7 @@ func (t *LinterTool) Name() string {
 }
 
 func (t *LinterTool) Description() string {
-	return "Check and fix code issues using linters"
+	return "Check and fix high priority code issues using linters"
 }
 
 func (t *LinterTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -41,30 +41,49 @@ func (t *LinterTool) Execute(ctx context.Context, args map[string]interface{}) (
 		path = "."
 	}
 
+	// Get severity level, default to high priority only
+	severity, _ := args["severity"].(string)
+	if severity == "" {
+		severity = "high"
+	}
+
 	switch operation {
 	case "check":
-		return t.checkCode(ctx, path)
+		return t.checkCode(ctx, path, severity)
 	case "fix":
-		return t.fixCode(ctx, path)
+		return t.fixCode(ctx, path, severity)
 	default:
 		return "", fmt.Errorf("unknown operation: %s", operation)
 	}
 }
 
 // checkCode runs linters to check the code
-func (t *LinterTool) checkCode(ctx context.Context, path string) (string, error) {
+func (t *LinterTool) checkCode(ctx context.Context, path string, severity string) (string, error) {
 	fullPath := filepath.Join(t.workspacePath, path)
 
 	// Run golangci-lint for Go files
 	if isGoFile(path) {
-		cmd := exec.CommandContext(ctx, "golangci-lint", "run", "--out-format=line-number", fullPath)
+		args := []string{"run", "--out-format=line-number"}
+
+		// Add severity filter
+		switch severity {
+		case "high":
+			args = append(args, "--severity=error")
+		case "medium":
+			args = append(args, "--severity=warning")
+		case "low":
+			args = append(args, "--severity=info")
+		}
+
+		args = append(args, fullPath)
+		cmd := exec.CommandContext(ctx, "golangci-lint", args...)
 		cmd.Dir = t.workspacePath
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			// Don't return error as it might just be linter findings
 			return string(output), nil
 		}
-		return "No issues found", nil
+		return "No high priority issues found", nil
 	}
 
 	// Add more language-specific linters here
@@ -72,7 +91,7 @@ func (t *LinterTool) checkCode(ctx context.Context, path string) (string, error)
 }
 
 // fixCode attempts to automatically fix linter issues
-func (t *LinterTool) fixCode(ctx context.Context, path string) (string, error) {
+func (t *LinterTool) fixCode(ctx context.Context, path string, severity string) (string, error) {
 	fullPath := filepath.Join(t.workspacePath, path)
 
 	// Fix Go files
@@ -83,14 +102,27 @@ func (t *LinterTool) fixCode(ctx context.Context, path string) (string, error) {
 			return "", fmt.Errorf("gofmt failed: %v\n%s", err, output)
 		}
 
-		// Run golangci-lint with --fix flag
-		lintCmd := exec.CommandContext(ctx, "golangci-lint", "run", "--fix", fullPath)
+		// Run golangci-lint with --fix flag and severity filter
+		args := []string{"run", "--fix"}
+
+		// Add severity filter
+		switch severity {
+		case "high":
+			args = append(args, "--severity=error")
+		case "medium":
+			args = append(args, "--severity=warning")
+		case "low":
+			args = append(args, "--severity=info")
+		}
+
+		args = append(args, fullPath)
+		lintCmd := exec.CommandContext(ctx, "golangci-lint", args...)
 		lintCmd.Dir = t.workspacePath
 		if output, err := lintCmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("golangci-lint fix failed: %v\n%s", err, output)
 		}
 
-		return "Fixed code style issues", nil
+		return "Fixed high priority code issues", nil
 	}
 
 	// Add more language-specific fixers here
