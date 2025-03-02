@@ -20,6 +20,20 @@ var (
 	Commit = "unknown"
 )
 
+// printLogo 打印 Tama 的 ASCII 艺术 logo
+func printLogo() {
+	fmt.Printf(`
+  _______                      
+ |__   __|                     
+    | | __ _ _ __ ___   __ _   
+    | |/ _' | '_ ' _ \ / _' |  
+    | | (_| | | | | | | (_| |  
+    |_|\__,_|_| |_| |_|\__,_|  
+                               
+ Copilot Agent - Your AI Coding Assistant
+`)
+}
+
 // rootCmd 表示基础命令
 var rootCmd = &cobra.Command{
 	Use:     "tama",
@@ -28,6 +42,12 @@ var rootCmd = &cobra.Command{
 	Long: `Tama is an autonomous AI coding assistant that acts as a peer programmer.
 It can perform multi-step coding tasks by analyzing your codebase, reading files,
 proposing edits, and running commands.`,
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// 在每个命令执行前打印 logo，除非是 help 或 completion 命令
+		if cmd.Name() != "help" && cmd.Name() != "completion" {
+			printLogo()
+		}
+	},
 }
 
 // Execute 执行根命令
@@ -41,16 +61,8 @@ func init() {
 		Use:   "version",
 		Short: "Print the version information",
 		Run: func(cmd *cobra.Command, args []string) {
+			// 版本命令不需要在这里打印 logo，因为 PersistentPreRun 已经打印了
 			fmt.Printf(`
-  _______                      
- |__   __|                     
-    | | __ _ _ __ ___   __ _   
-    | |/ _' | '_ ' _ \ / _' |  
-    | | (_| | | | | | | (_| |  
-    |_|\__,_|_| |_| |_|\__,_|  
-                               
- Copilot Agent - Your AI Coding Assistant
- 
  Version:    %s
  Build Time: %s
  Commit:     %s
