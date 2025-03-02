@@ -1,14 +1,15 @@
 package agent
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/chzyer/readline"
 	"github.com/warm3snow/tama/internal/config"
 	"github.com/warm3snow/tama/internal/llm"
 	"github.com/warm3snow/tama/internal/tools"
@@ -48,24 +49,48 @@ func (a *Agent) Start() error {
 	fmt.Printf("Using LLM provider: %s, model: %s\n", a.config.LLM.Provider, a.config.LLM.Model)
 	fmt.Println("Type 'exit' to quit.")
 
-	// Create a reader for user input
-	reader := bufio.NewReader(os.Stdin)
+	// Initialize readline with proper line editing
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          "> ",
+		HistoryFile:     os.ExpandEnv("${HOME}/.tama_history"),
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	})
+	if err != nil {
+		return fmt.Errorf("error initializing readline: %w", err)
+	}
+	defer rl.Close()
 
 	// Main agent loop
 	for {
-		// Get user input (prompt)
-		fmt.Print("> ")
-		input, err := reader.ReadString('\n')
+		// Get user input with proper line editing
+		input, err := rl.Readline()
 		if err != nil {
+			if err == readline.ErrInterrupt {
+				if len(input) == 0 {
+					break
+				} else {
+					continue
+				}
+			} else if err == io.EOF {
+				break
+			}
 			return fmt.Errorf("error reading input: %w", err)
 		}
 
-		// Trim whitespace and newlines
+		// Trim whitespace
 		input = strings.TrimSpace(input)
 
 		if input == "exit" {
 			break
 		}
+
+		if input == "" {
+			continue
+		}
+
+		// Add to history
+		rl.SaveHistory(input)
 
 		// Execute the task
 		if err := a.ExecuteTask(input); err != nil {
