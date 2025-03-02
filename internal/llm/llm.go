@@ -23,6 +23,7 @@ type Action struct {
 // Interface defines the interface for LLM clients
 type Interface interface {
 	GetNextAction(prompt string) (*Action, error)
+	GetNextActionFromConversation(conversation []ChatMessage) (*Action, error)
 }
 
 // Client implements the LLM interface
@@ -69,15 +70,10 @@ func NewClient(cfg config.LLMConfig) Interface {
 	}
 }
 
-// GetNextAction gets the next action from the LLM
+// GetNextAction gets the next action from the LLM using a single prompt
 func (c *Client) GetNextAction(prompt string) (*Action, error) {
-	// In development mode, use the mock implementation
-	if c.config.Provider == "mock" {
-		return c.mockGetNextAction(prompt)
-	}
-
-	// Prepare the request to the OpenAI-compatible API
-	messages := []ChatMessage{
+	// Convert the prompt to a conversation with system and user messages
+	conversation := []ChatMessage{
 		{
 			Role:    "system",
 			Content: "You are a copilot agent that helps users complete coding tasks. You should analyze the context and determine the next action to take. Respond with a JSON object containing the tool to execute, arguments for the tool, and whether the task is complete.",
@@ -88,10 +84,21 @@ func (c *Client) GetNextAction(prompt string) (*Action, error) {
 		},
 	}
 
+	// Use the conversation-based method
+	return c.GetNextActionFromConversation(conversation)
+}
+
+// GetNextActionFromConversation gets the next action from the LLM using a conversation history
+func (c *Client) GetNextActionFromConversation(conversation []ChatMessage) (*Action, error) {
+	// In development mode, use the mock implementation
+	if c.config.Provider == "mock" {
+		return c.mockGetNextActionFromConversation(conversation)
+	}
+
 	// Create the request
 	reqBody := OpenAIRequest{
 		Model:       c.config.Model,
-		Messages:    messages,
+		Messages:    conversation,
 		Temperature: c.config.Temperature,
 		MaxTokens:   c.config.MaxTokens,
 	}
@@ -173,94 +180,87 @@ func (c *Client) GetNextAction(prompt string) (*Action, error) {
 	return &action, nil
 }
 
-// extractJSON extracts JSON from a string that might contain markdown
-func extractJSON(content string) string {
-	// Check if the content is wrapped in markdown code blocks
-	if strings.Contains(content, "```json") {
-		parts := strings.Split(content, "```json")
-		if len(parts) > 1 {
-			jsonPart := parts[1]
-			endIndex := strings.Index(jsonPart, "```")
-			if endIndex > 0 {
-				return strings.TrimSpace(jsonPart[:endIndex])
-			}
-			return strings.TrimSpace(jsonPart)
+// mockGetNextActionFromConversation is a mock implementation for development
+func (c *Client) mockGetNextActionFromConversation(conversation []ChatMessage) (*Action, error) {
+	// Get the last user message
+	var lastUserMessage string
+	for i := len(conversation) - 1; i >= 0; i-- {
+		if conversation[i].Role == "user" {
+			lastUserMessage = conversation[i].Content
+			break
 		}
 	}
 
-	// Check if the content is wrapped in regular code blocks
-	if strings.Contains(content, "```") {
-		parts := strings.Split(content, "```")
-		if len(parts) > 1 {
-			return strings.TrimSpace(parts[1])
+	// Check if this is a tool result message
+	if strings.Contains(lastUserMessage, "Tool execution result for") {
+		// This is a follow-up after a tool execution
+		toolName := extractToolNameFromResult(lastUserMessage)
+
+		// Suggest the next logical action based on the previous tool
+		switch toolName {
+		case "file_read":
+			return &Action{
+				Tool: "file_edit",
+				Args: map[string]interface{}{
+					"path":    inferFilePath(lastUserMessage),
+					"content": generateMockContent(lastUserMessage),
+				},
+				IsComplete: false,
+				Reasoning:  "After reading the file, we should edit it to implement the requested changes.",
+			}, nil
+		case "file_edit":
+			return &Action{
+				Tool: "terminal_run",
+				Args: map[string]interface{}{
+					"command": "go build",
+				},
+				IsComplete: false,
+				Reasoning:  "After editing the file, we should build the project to verify the changes.",
+			}, nil
+		case "terminal_run":
+			return &Action{
+				Tool: "test_run",
+				Args: map[string]interface{}{
+					"path": "./...",
+				},
+				IsComplete: false,
+				Reasoning:  "After building the project, we should run tests to verify functionality.",
+			}, nil
+		case "test_run":
+			return &Action{
+				Tool:       "",
+				Args:       nil,
+				IsComplete: true,
+				Reasoning:  "All tests passed. The task is complete.",
+			}, nil
+		default:
+			// If we can't determine the next action, default to completing the task
+			return &Action{
+				Tool:       "",
+				Args:       nil,
+				IsComplete: true,
+				Reasoning:  "The task appears to be complete based on the sequence of actions performed.",
+			}, nil
 		}
 	}
 
-	// Return the original content
-	return content
+	// If this is the initial message, use the original mock implementation
+	return c.mockGetNextAction(lastUserMessage)
 }
 
-// inferActionFromContent tries to infer an action from the content
-func inferActionFromContent(content string) (*Action, error) {
-	content = strings.ToLower(content)
-
-	// Check for completion
-	if strings.Contains(content, "complete") || strings.Contains(content, "finished") || strings.Contains(content, "done") {
-		return &Action{
-			Tool:       "",
-			Args:       nil,
-			IsComplete: true,
-			Reasoning:  "Task appears to be complete based on LLM response.",
-		}, nil
+// extractToolNameFromResult extracts the tool name from a result message
+func extractToolNameFromResult(message string) string {
+	if strings.Contains(message, "Tool execution result for") {
+		parts := strings.Split(message, "Tool execution result for")
+		if len(parts) > 1 {
+			toolPart := parts[1]
+			endIndex := strings.Index(toolPart, ":")
+			if endIndex > 0 {
+				return strings.TrimSpace(toolPart[:endIndex])
+			}
+		}
 	}
-
-	// Check for file operations
-	if strings.Contains(content, "read") && strings.Contains(content, "file") {
-		return &Action{
-			Tool: "file_read",
-			Args: map[string]interface{}{
-				"path": inferFilePath(content),
-			},
-			IsComplete: false,
-			Reasoning:  "LLM response suggests reading a file.",
-		}, nil
-	}
-
-	if (strings.Contains(content, "edit") || strings.Contains(content, "modify") ||
-		strings.Contains(content, "create") || strings.Contains(content, "write")) &&
-		strings.Contains(content, "file") {
-		return &Action{
-			Tool: "file_edit",
-			Args: map[string]interface{}{
-				"path":    inferFilePath(content),
-				"content": "", // This will need to be filled in by the agent
-			},
-			IsComplete: false,
-			Reasoning:  "LLM response suggests editing a file.",
-		}, nil
-	}
-
-	// Check for terminal operations
-	if strings.Contains(content, "run") || strings.Contains(content, "execute") || strings.Contains(content, "command") {
-		return &Action{
-			Tool: "terminal_run",
-			Args: map[string]interface{}{
-				"command": inferCommand(content),
-			},
-			IsComplete: false,
-			Reasoning:  "LLM response suggests running a command.",
-		}, nil
-	}
-
-	// Default to reading a file
-	return &Action{
-		Tool: "file_read",
-		Args: map[string]interface{}{
-			"path": "main.go",
-		},
-		IsComplete: false,
-		Reasoning:  "Defaulting to reading main.go based on LLM response.",
-	}, nil
+	return ""
 }
 
 // mockGetNextAction is a mock implementation for development
@@ -352,6 +352,96 @@ func (c *Client) mockGetNextAction(prompt string) (*Action, error) {
 		},
 		IsComplete: false,
 		Reasoning:  "Starting by examining the main entry point of the application.",
+	}, nil
+}
+
+// extractJSON extracts JSON from a string that might contain markdown
+func extractJSON(content string) string {
+	// Check if the content is wrapped in markdown code blocks
+	if strings.Contains(content, "```json") {
+		parts := strings.Split(content, "```json")
+		if len(parts) > 1 {
+			jsonPart := parts[1]
+			endIndex := strings.Index(jsonPart, "```")
+			if endIndex > 0 {
+				return strings.TrimSpace(jsonPart[:endIndex])
+			}
+			return strings.TrimSpace(jsonPart)
+		}
+	}
+
+	// Check if the content is wrapped in regular code blocks
+	if strings.Contains(content, "```") {
+		parts := strings.Split(content, "```")
+		if len(parts) > 1 {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+
+	// Return the original content
+	return content
+}
+
+// inferActionFromContent tries to infer an action from the content
+func inferActionFromContent(content string) (*Action, error) {
+	content = strings.ToLower(content)
+
+	// Check for completion
+	if strings.Contains(content, "complete") || strings.Contains(content, "finished") || strings.Contains(content, "done") {
+		return &Action{
+			Tool:       "",
+			Args:       nil,
+			IsComplete: true,
+			Reasoning:  "Task appears to be complete based on LLM response.",
+		}, nil
+	}
+
+	// Check for file operations
+	if strings.Contains(content, "read") && strings.Contains(content, "file") {
+		return &Action{
+			Tool: "file_read",
+			Args: map[string]interface{}{
+				"path": inferFilePath(content),
+			},
+			IsComplete: false,
+			Reasoning:  "LLM response suggests reading a file.",
+		}, nil
+	}
+
+	if (strings.Contains(content, "edit") || strings.Contains(content, "modify") ||
+		strings.Contains(content, "create") || strings.Contains(content, "write")) &&
+		strings.Contains(content, "file") {
+		return &Action{
+			Tool: "file_edit",
+			Args: map[string]interface{}{
+				"path":    inferFilePath(content),
+				"content": "", // This will need to be filled in by the agent
+			},
+			IsComplete: false,
+			Reasoning:  "LLM response suggests editing a file.",
+		}, nil
+	}
+
+	// Check for terminal operations
+	if strings.Contains(content, "run") || strings.Contains(content, "execute") || strings.Contains(content, "command") {
+		return &Action{
+			Tool: "terminal_run",
+			Args: map[string]interface{}{
+				"command": inferCommand(content),
+			},
+			IsComplete: false,
+			Reasoning:  "LLM response suggests running a command.",
+		}, nil
+	}
+
+	// Default to reading a file
+	return &Action{
+		Tool: "file_read",
+		Args: map[string]interface{}{
+			"path": "main.go",
+		},
+		IsComplete: false,
+		Reasoning:  "Defaulting to reading main.go based on LLM response.",
 	}, nil
 }
 

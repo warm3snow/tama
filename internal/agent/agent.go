@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/warm3snow/tama/internal/config"
@@ -45,12 +48,20 @@ func (a *Agent) Start() error {
 	fmt.Printf("Using LLM provider: %s, model: %s\n", a.config.LLM.Provider, a.config.LLM.Model)
 	fmt.Println("Type 'exit' to quit.")
 
+	// Create a reader for user input
+	reader := bufio.NewReader(os.Stdin)
+
 	// Main agent loop
 	for {
 		// Get user input (prompt)
-		var input string
 		fmt.Print("> ")
-		fmt.Scanln(&input)
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("error reading input: %w", err)
+		}
+
+		// Trim whitespace and newlines
+		input = strings.TrimSpace(input)
 
 		if input == "exit" {
 			break
@@ -76,14 +87,26 @@ func (a *Agent) ExecuteTask(task string) error {
 	}
 
 	// Step 2: Create initial prompt with task and context
-	prompt := a.createInitialPrompt(task, workspaceContext)
+	initialPrompt := a.createInitialPrompt(task, workspaceContext)
+
+	// Create a conversation history to track the interaction
+	conversation := []llm.ChatMessage{
+		{
+			Role:    "system",
+			Content: a.createSystemPrompt(),
+		},
+		{
+			Role:    "user",
+			Content: initialPrompt,
+		},
+	}
 
 	// Main execution loop as shown in the diagram
 	maxIterations := 10
 	for i := 0; i < maxIterations; i++ {
-		// Step 3: Send prompt to LLM
+		// Step 3: Send conversation to LLM
 		fmt.Println("Thinking...")
-		action, err := a.llm.GetNextAction(prompt)
+		action, err := a.llm.GetNextActionFromConversation(conversation)
 		if err != nil {
 			return fmt.Errorf("failed to get next action from LLM: %w", err)
 		}
@@ -105,26 +128,63 @@ func (a *Agent) ExecuteTask(task string) error {
 
 		result, err := a.executeTool(action.Tool, action.Args)
 
-		// Step 6: Add result or error to prompt for next iteration
+		// Step 6: Add result or error to conversation for next iteration
+		var resultMessage string
 		if err != nil {
-			errorMessage := fmt.Sprintf("Error: %s", err)
+			errorMessage := fmt.Sprintf("Error executing tool %s: %s", action.Tool, err)
 			fmt.Println(errorMessage)
-			prompt = a.appendToPrompt(prompt, errorMessage)
+			resultMessage = errorMessage
 		} else {
-			// Summarize result if it's too long
+			// Summarize result if it's too long for display
 			resultSummary := result
 			if len(result) > 500 {
 				resultSummary = result[:500] + "... (truncated)"
 			}
 			fmt.Printf("Result: %s\n", resultSummary)
-			prompt = a.appendToPrompt(prompt, fmt.Sprintf("Result: %s", result))
+			resultMessage = fmt.Sprintf("Tool execution result for %s: %s", action.Tool, result)
 		}
+
+		// Add the assistant's action and the tool result to the conversation
+		conversation = append(conversation, llm.ChatMessage{
+			Role:    "assistant",
+			Content: a.formatActionAsMessage(action),
+		})
+
+		conversation = append(conversation, llm.ChatMessage{
+			Role:    "user",
+			Content: resultMessage,
+		})
 
 		// Small delay to avoid overwhelming the system
 		time.Sleep(100 * time.Millisecond)
 	}
 
 	return errors.New("maximum iterations reached without completing the task")
+}
+
+// createSystemPrompt creates the system prompt for the LLM
+func (a *Agent) createSystemPrompt() string {
+	return `You are a copilot agent that helps users complete coding tasks. 
+You should analyze the context and determine the next action to take.
+
+For each step, you should:
+1. Analyze the current state and context
+2. Decide on the next action to take
+3. Respond with a JSON object containing the tool to execute, arguments for the tool, and whether the task is complete
+
+Your response must be a valid JSON object with the following structure:
+{
+  "tool": "tool_name",  // The tool to execute (leave empty if task is complete)
+  "args": {             // Arguments for the tool
+    "key1": "value1",
+    "key2": "value2"
+  },
+  "is_complete": false, // Set to true if the task is complete
+  "reasoning": "Explanation for why this action was chosen"
+}
+
+After each tool execution, you will receive the result and should decide on the next action.
+Think step by step and make sure each action brings you closer to completing the task.`
 }
 
 // createInitialPrompt creates the initial prompt for the LLM
@@ -147,18 +207,37 @@ Workspace Context:
 Available Tools:
 %s
 
-You are a copilot agent that helps users complete coding tasks. Analyze the context and determine the next action to take.
-Respond with a JSON object containing:
-{
-  "tool": "tool_name",  // The tool to execute (leave empty if task is complete)
-  "args": {             // Arguments for the tool
-    "key1": "value1",
-    "key2": "value2"
-  },
-  "is_complete": false, // Set to true if the task is complete
-  "reasoning": "Explanation for why this action was chosen"
-}`,
+Please help me complete this task by determining the appropriate actions to take.`,
 		task, osContext, workspaceContext, toolsDescription)
+}
+
+// formatActionAsMessage formats an action as a message for the conversation
+func (a *Agent) formatActionAsMessage(action *llm.Action) string {
+	// Convert the action to JSON
+	actionJSON := fmt.Sprintf(`{
+  "tool": "%s",
+  "args": %v,
+  "is_complete": %t,
+  "reasoning": "%s"
+}`, action.Tool, action.Args, action.IsComplete, action.Reasoning)
+
+	// Replace the args placeholder with the actual args
+	argsStr := "{"
+	for k, v := range action.Args {
+		if str, ok := v.(string); ok {
+			argsStr += fmt.Sprintf(`"%s": "%s", `, k, str)
+		} else {
+			argsStr += fmt.Sprintf(`"%s": %v, `, k, v)
+		}
+	}
+	if len(action.Args) > 0 {
+		argsStr = argsStr[:len(argsStr)-2] // Remove trailing comma and space
+	}
+	argsStr += "}"
+
+	actionJSON = strings.Replace(actionJSON, "map[string]interface {}{}", argsStr, 1)
+
+	return actionJSON
 }
 
 // getOSContext gets information about the operating system
@@ -166,11 +245,6 @@ func (a *Agent) getOSContext() string {
 	// Get OS info from the config package
 	osContext := config.GetOSContext()
 	return fmt.Sprintf("%s %s (%s)", osContext.Name, osContext.Version, osContext.Arch)
-}
-
-// appendToPrompt appends information to the existing prompt
-func (a *Agent) appendToPrompt(prompt, info string) string {
-	return fmt.Sprintf("%s\n\n%s", prompt, info)
 }
 
 // executeTool executes a tool with the given arguments

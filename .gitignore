@@ -9,10 +9,11 @@ tama
 # Test binary, built with `go test -c`
 *.test
 
-# Output of the go coverage tool, specifically when used with LiteIDE
+# Output of the go coverage tool
 *.out
+coverage.html
 
-# Dependency directories (remove the comment below to include it)
+# Dependency directories
 vendor/
 
 # Go workspace file
@@ -24,8 +25,20 @@ go.work
 *.swp
 *.swo
 
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
 # Environment variables
 .env
+.env.local
+
+# Build directory
+bin/
+dist/
 
 # API keys and secrets
 tama.yaml 

@@ -10,11 +10,28 @@ Tama is an autonomous AI coding assistant that acts as a peer programmer. It can
 - **Continuous Improvement**: Monitors output and auto-corrects in a loop until tasks are completed
 - **Natural Language Interface**: Communicate your coding tasks in plain English
 - **Local LLM Support**: Uses Ollama by default with llama3.2:latest model
+- **Multi-turn Reasoning**: Maintains conversation history for better context and decision making
 
 ## Installation
 
+### Using Go
+
 ```bash
 go get github.com/warm3snow/tama
+```
+
+### Building from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/warm3snow/tama.git
+cd tama
+
+# Build the project
+make build
+
+# Install the binary
+make install
 ```
 
 ## Prerequisites
@@ -40,6 +57,33 @@ tama exec "create a REST API endpoint for user authentication"
 tama help
 ```
 
+## Development
+
+The project includes a Makefile to simplify common development tasks:
+
+```bash
+# Build the application
+make build
+
+# Run tests
+make test
+
+# Run tests with coverage report
+make test-coverage
+
+# Format code
+make fmt
+
+# Run linting
+make lint
+
+# Clean build artifacts
+make clean
+
+# See all available commands
+make help
+```
+
 ## Architecture
 
 Tama follows a modular architecture with the following components:
@@ -59,9 +103,28 @@ Tama follows a modular architecture with the following components:
 3. Copilot sends the prompt, context, and available tools to the LLM
 4. LLM decides on the next action to take (which tool to use with what arguments)
 5. Copilot executes the tool and captures the result
-6. Result is sent back to the LLM along with the original context for the next decision
-7. This loop continues until the task is complete
-8. Results are streamed back to the user
+6. Result is sent back to the LLM along with the conversation history for the next decision
+7. This loop continues automatically until the task is complete
+8. Results are streamed back to the user in real-time
+
+### Conversation-Based Reasoning
+
+Tama uses a conversation-based approach for interacting with the LLM:
+
+1. The system maintains a conversation history that includes:
+   - The initial task and context
+   - Each tool execution decision made by the LLM
+   - The results of each tool execution
+   
+2. This conversation history provides the LLM with:
+   - Full context of previous actions and their results
+   - Ability to learn from errors and adjust its approach
+   - Better reasoning about the current state of the task
+
+3. The LLM can make more informed decisions by:
+   - Analyzing the results of previous tool executions
+   - Understanding what has been tried and what has succeeded or failed
+   - Building on previous steps to complete complex multi-step tasks
 
 ## Configuration
 
